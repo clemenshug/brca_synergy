@@ -1,0 +1,176 @@
+---
+title: "Process NCI data"
+author: "Clemens Hug"
+date: "6/16/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(data.table)
+library(vroom)
+library(fst)
+library(here)
+
+dir_data <- here("data")
+dir.create(dir_data, showWarnings = FALSE)
+dir_res <- here("nci")
+dir.create(dir_res, showWarnings = FALSE)
+
+synapser::synLogin()
+syn <- synExtra::synDownloader(dir_data)
+```
+
+## Download
+
+```{r download, message=FALSE}
+options(timeout = 300)
+
+nci_60_doseresp_path <- file.path(dir_data, "nci_60_doseresp.zip")
+if (!file.exists(nci_60_doseresp_path))
+  download.file(
+    "https://wiki.nci.nih.gov/download/attachments/147193864/DOSERESP.zip?version=1&modificationDate=1622830743000&api=v2",
+    nci_60_doseresp_path
+  )
+
+nci_almanac_path <- file.path(dir_data, "nci_almanac.zip")
+if (!file.exists(nci_almanac_path))
+  download.file(
+    "https://wiki.nci.nih.gov/download/attachments/338237347/ComboDrugGrowth_Nov2017.zip?version=1&modificationDate=1510057275000&api=v2",
+    nci_almanac_path
+  )
+
+nci_almanac_drug_meta_path <- file.path(dir_data, "nci_almanac_drug_meta.csv")
+if (!file.exists(nci_almanac_drug_meta_path))
+  download.file(
+    "https://wiki.nci.nih.gov/download/attachments/338237347/ComboCompoundNames_small.txt?version=1&modificationDate=1493822467000&api=v2",
+    nci_almanac_drug_meta_path
+  )
+
+unzip(nci_60_doseresp_path)
+unzip(nci_almanac_path)
+```
+
+```{r read}
+lspci_drug_names <- syn("syn25173503") %>%
+  read_fst(as.data.table = TRUE) %>%
+  mutate(across(name, str_to_lower))
+
+lspci_clinical_info <- syn("syn25173555") %>%
+  read_fst(as.data.table = TRUE)
+
+lspci_compound_dictionary <- syn("syn25173500") %>%
+  read_fst(as.data.table = TRUE)
+
+nci_60_doseresp_raw <- file.path(dir_data, "DOSERESP.csv") %>%
+  vroom()
+
+nci_almanac_raw <- file.path(dir_data, "ComboDrugGrowth_Nov2017.csv") %>%
+  vroom()
+
+nci_almanac_drug_meta_raw <- read_tsv(nci_almanac_drug_meta_path, col_names = c("id", "name"))
+```
+
+```{r map_drugs}
+nci_almanac_drug_meta <- nci_almanac_drug_meta_raw %>%
+  mutate(across(name, str_to_lower)) %>%
+  # Rename manually mapped drugs
+  mutate(
+    name = recode(name, `2-fluoro ara-a` = "fludarabine", `4'-epiadriamycin` = "doxorubicin"),
+    split = FALSE
+  ) %>%
+  bind_rows(
+    mutate(., name = str_split(name, fixed(" ")) %>% map_chr(1), split = TRUE)
+  ) %>%
+  left_join(lspci_drug_names, by = "name") %>%
+  drop_na() %>%
+  distinct(id, lspci_id, source, priority, split) %>%
+  left_join(
+    lspci_clinical_info %>%
+      mutate(max_phase = coalesce(max_phase, 0)) %>%
+      distinct(lspci_id, max_phase, indication_class) %>%
+      group_by(lspci_id) %>%
+      filter(max_phase == max(max_phase)) %>%
+      ungroup()
+  ) %>%
+  mutate(max_phase = coalesce(max_phase, 0)) %>%
+  # If there are matches without splitting names, keep only those
+  # If there are still multiple matches, keep one in highest clinical phase
+  group_by(id) %>%
+  filter(if (any(!split)) !split else TRUE, max_phase == max(max_phase, na.rm = TRUE)) %>%
+  ungroup() %>%
+  distinct(id, lspci_id, max_phase) %>%
+  left_join(
+    lspci_compound_dictionary %>%
+      select(lspci_id, pref_name)
+  )
+
+write_csv(
+  nci_almanac_drug_meta,
+  file.path(dir_res, "nci_almanac_drug_meta.csv")
+)
+```
+
+PercentGrowth    NUMBER           percent growth of drug combination 
+                                   against cell line, using time zero in 
+                                   calculation
+PercentGrowthNoTZ NUMBER          percent growth without time zero
+TestValue         NUMBER          test mean optical density
+ControlValue      NUMBER          vehicle control mean optical density
+TZValue           NUMBER          time zero mean optical density
+ExpectedGrowth    NUMBER          expected percent growth for combination, 
+                                   based on values for individual drugs
+Score             NUMBER(4)       score, for combination records
+
+
+```{r wrangle_almanac}
+cell_line_meta <- nci_almanac_raw %>%
+  distinct(
+    panel_id = PANELNBR, cell_id = CELLNBR, panel_name = PANEL, cell_name = CELLNAME
+  )
+
+write_csv(
+  cell_line_meta,
+  file.path(dir_res, "nci_almanac_cell_line_meta.csv")
+)
+
+nci_almanac <- nci_almanac_raw %>%
+  select(
+    # All concentrations are in M, leaving column out
+    panel_id = PANELNBR,
+    cell_id = CELLNBR,
+    drug_id_1 = NSC1,
+    drug_concentration_1 = CONC1,
+    drug_concentration_index_1 = CONCINDEX1,
+    drug_id_2 = NSC2,
+    drug_concentration_2 = CONC2,
+    drug_concentration_index_2 = CONCINDEX2,
+    PERCENTGROWTH,
+    PERCENTGROWTHNOTZ,
+    TESTVALUE,
+    CONTROLVALUE,
+    TZVALUE,
+    EXPECTEDGROWTH,
+    SCORE
+  ) %>%
+  left_join(
+    select(nci_almanac_drug_meta, drug_id_1 = id, lspci_id_1 = lspci_id)
+  ) %>%
+  left_join(
+    select(nci_almanac_drug_meta, drug_id_2 = id, lspci_id_2 = lspci_id)
+  )
+
+fwrite(
+  nci_almanac,
+  file.path(dir_res, "nci_almanac_growth_data.csv.gz")
+)
+```
+
+
+```{r store_synapse}
+
+
+
+```
