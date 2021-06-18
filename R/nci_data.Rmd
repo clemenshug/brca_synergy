@@ -170,7 +170,23 @@ fwrite(
 
 
 ```{r store_synapse}
+activity <- synapser::Activity(
+  "Wrangle NCI growth data",
+  used = c(
+    "syn25173503", "syn25173555", "syn25173500",
+    "https://wiki.nci.nih.gov/display/NCIDTPdata/DTP+NCI+Bulk+Data+for+Download"
+  ),
+  executed = "https://github.com/clemenshug/brca_synergy/blob/main/R/nci_data.Rmd"
+)
 
+syn_project <- "syn25882516"
+syn_nci <- synExtra::synMkdir(syn_project, "data", "nci", .recursive = TRUE)
 
+c(
+  file.path(dir_res, "nci_almanac_drug_meta.csv"),
+  file.path(dir_res, "nci_almanac_cell_line_meta.csv"),
+  file.path(dir_res, "nci_almanac_growth_data.csv.gz")
+) %>%
+  synExtra::synStoreMany(parentId = syn_nci, forceVersion = FALSE, activity = activity)
 
 ```
