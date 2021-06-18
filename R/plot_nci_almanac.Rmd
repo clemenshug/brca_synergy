@@ -1,0 +1,278 @@
+---
+title: "Plot NCI data"
+author: "Clemens Hug"
+date: "6/16/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(data.table)
+library(here)
+library(ggbeeswarm)
+library(patchwork)
+
+dir_data <- here("data")
+dir.create(dir_data, showWarnings = FALSE)
+dir_res <- here("nci")
+dir.create(dir_res, showWarnings = FALSE)
+
+synapser::synLogin()
+syn <- synExtra::synDownloader(dir_data)
+```
+
+## Load data from Synapse
+
+```{r load}
+growth_data_raw <- syn("syn25882596") %>%
+  read_csv()
+meta_cell_line <- syn("syn25882595") %>%
+  read_csv()
+meta_drugs <- syn("syn25882594") %>%
+  read_csv()
+```
+
+## Format data for plotting
+
+PercentGrowth    NUMBER           percent growth of drug combination
+against cell line, using time zero in
+calculation
+PercentGrowthNoTZ NUMBER          percent growth without time zero
+TestValue         NUMBER          test mean optical density
+ControlValue      NUMBER          vehicle control mean optical density
+TZValue           NUMBER          time zero mean optical density
+ExpectedGrowth    NUMBER          expected percent growth for combination,
+based on values for individual drugs
+Score             NUMBER(4)       score, for combination records
+
+```{r gr}
+compute_metrics <- function(data) {
+  mutate(
+    data,
+    fraction_killing = 1 - (TESTVALUE / CONTROLVALUE),
+    log_killing = log10(CONTROLVALUE / TESTVALUE),
+    gr = log2(TESTVALUE / TZVALUE) / log2(CONTROLVALUE / TZVALUE),
+    gr_bound = 2**gr - 1
+  )
+}
+
+growth_data <- growth_data_raw %>%
+  compute_metrics()
+
+growth_data_single_dose_all <- growth_data %>%
+  filter(is.na(lspci_id_2)) %>%
+  select(
+    panel_id, cell_id,
+    lspci_id = lspci_id_1,
+    drug_concentration = drug_concentration_1,
+    ends_with("killing"),
+    ends_with("VALUE"),
+    starts_with("gr")
+  )
+
+growth_data_single_dose_agg <- growth_data_single_dose_all %>%
+  group_by(panel_id, cell_id, lspci_id, drug_concentration) %>%
+  summarize(
+    across(ends_with("VALUE"), mean),
+    .groups = "drop"
+  ) %>%
+  compute_metrics()
+  
+growth_data_bliss <- growth_data %>%
+  filter(!is.na(lspci_id_2)) %>%
+  left_join(
+    growth_data_single_dose_agg %>%
+      select(
+        panel_id, cell_id,
+        lspci_id_1 = lspci_id, drug_concentration_1 = drug_concentration,
+        fraction_killing_1 = fraction_killing
+      )
+  ) %>%
+  left_join(
+    growth_data_single_dose_agg %>%
+      select(
+        panel_id, cell_id,
+        lspci_id_2 = lspci_id, drug_concentration_2 = drug_concentration,
+        fraction_killing_2 = fraction_killing
+      )
+  ) %>%
+  mutate(
+    fraction_killing_bliss_expected = fraction_killing_1 + fraction_killing_2 - fraction_killing_1 * fraction_killing_2,
+    excess_killing = log10(1 - fraction_killing_bliss_expected) - log10(1 - fraction_killing)
+  )
+```
+
+```{r gr_descriptive}
+plt <- growth_data_gr %>%
+  ggplot(aes(gr)) +
+     geom_linerange(
+      aes(q, ymin = -0.3, ymax = 0),
+      data = ~quantile(.x$gr, seq(.1, 0.9, by = 0.1)) %>%
+        enframe("quantile", "q")
+    ) +
+    geom_histogram(aes(y = stat(density))) +
+    geom_density(color = "red") +
+    lims(x = c(-2, NA))
+
+ggsave(
+  file.path(dir_res, "desc_gr_histogram.pdf"), plt,
+  width = 4, height = 2
+)
+
+```
+
+
+```{r plot_bliss}
+growth_data_bliss_nested <- growth_data_bliss %>%
+  group_nest(
+    panel_id, cell_id, lspci_id_1, lspci_id_2
+  ) %>%
+  left_join(
+    meta_cell_line
+  ) %>%
+  left_join(
+    select(meta_drugs, lspci_id_1 = lspci_id, pref_name_1 = pref_name)
+  ) %>%
+  left_join(
+    select(meta_drugs, lspci_id_2 = lspci_id, pref_name_2 = pref_name)
+  )
+
+adam_cmap <- c(
+  "#FFDA64", "#FFC952", "#FAB534", "#FCAB24", "#F79820", "#F48221", "#F4751C",
+  "#EB6820", "#D95330", "#D04445", "#B93B51", "#953565", "#78287E", "#522B6E", "#22152F"
+)
+
+plot_gr <- function(panel_id, cell_id, lspci_ids, highlight_conc = FALSE) {
+  data_agg <- growth_data_single_dose_agg %>%
+    filter(panel_id == !!panel_id, cell_id == !!cell_id, lspci_id %in% lspci_ids) %>%
+    left_join(meta_drugs)
+  data_all <- growth_data_single_dose_all %>%
+    filter(panel_id == !!panel_id, cell_id == !!cell_id, lspci_id %in% lspci_ids) %>%
+    left_join(meta_drugs)
+  plt <- ggplot(data_agg, aes(drug_concentration, gr)) +
+    geom_line(color = "gray") +
+    geom_beeswarm(data = data_all, groupOnX = TRUE) +
+    scale_x_log10() +
+    labs(x = "Concentration") +
+    theme_minimal()
+  if (length(lspci_ids) > 1)
+    plt <- plt + facet_wrap(vars(pref_name), scales = "free_x")
+  if (highlight_conc) {
+    conc_data <- growth_data_bliss_nested %>%
+      filter(lspci_id_1 == lspci_ids[1], lspci_id_2 == lspci_ids[2]) %>%
+      chuck("data", 1)
+    plt <- plt +
+      geom_linerange(
+        aes(x = drug_concentration, y = NULL), ymin = -Inf, ymax = Inf,
+        data = bind_rows(
+          transmute(conc_data, lspci_id = lspci_ids[1], drug_concentration = drug_concentration_1),
+          transmute(conc_data, lspci_id = lspci_ids[2], drug_concentration = drug_concentration_2),
+        ) %>%
+          distinct() %>%
+          left_join(meta_drugs)
+      )
+  }
+  plt
+}
+
+plot_bliss <- function(..., fill_var = NULL) {
+  args <- list(...)
+  if (is.null(fill_var))
+    fill_var <- "fraction_killing"
+  fill_var_sym <- sym(fill_var)
+  data <- args$data[[1]] %>%
+    mutate(across(c(drug_concentration_1, drug_concentration_2), ~fct_inseq(as.character(.x))))
+  plt <- ggplot(data, aes(drug_concentration_1, drug_concentration_2, fill = !!fill_var_sym)) +
+    geom_tile() +
+    labs(
+      title = paste(
+        args$pref_name_1, "and", args$pref_name_2, "in", args$cell_name, paste0("(", args$panel_name, ")")
+      ),
+      x = paste(args$pref_name_1, "concentration"),
+      y = paste(args$pref_name_2, "concentration"),
+    ) +
+    theme_minimal()
+  if (fill_var %in% c("excess_killing"))
+    plt <- plt + scale_fill_distiller(type = "div", palette = "RdBu", limits = c(-1, 1) * max(abs(data[[fill_var]])))
+  else if (fill_var %in% c("gr"))
+    # plt <- plt + scale_fill_viridis_c(option = "inferno", limits = c(-1.5, 1))
+    plt <- plt + scale_fill_gradientn(colors = rev(adam_cmap), limits = c(-1.5, 1))
+  else if (str_starts(fill_var, fixed("fraction_killing")) | fill_var %in% c("log_killing"))
+    plt <- plt +
+      scale_fill_viridis_c(direction = -1, trans = "log2", breaks = scales::log_breaks(base = 2))
+      # scale_fill_gradientn(colors = pals::parula(100), trans = "log2", breaks = scales::log_breaks(base = 2))
+  plt
+}
+
+plot_combo <- function(...) {
+  args <- list(...)
+  
+  plot_bliss_l <- lift_dl(plot_bliss)
+  
+  plt <- (
+      plot_bliss_l(args, fill_var = "excess_killing") + labs(x = NULL) |
+      plot_bliss_l(args, fill_var = "gr") + labs(title = NULL, x = NULL, y = NULL)
+    ) /
+    (
+      plot_bliss_l(args, fill_var = "fraction_killing") + labs(title = NULL) |
+      plot_bliss_l(args, fill_var = "fraction_killing_bliss_expected") + labs(title = NULL, y = NULL)
+    ) / plot_gr(args$panel_id, args$cell_id, c(args$lspci_id_1, args$lspci_id_2), highlight_conc = TRUE)
+  plt
+}
+x <- growth_data_bliss_nested %>% filter(lspci_id_1 == 487093, lspci_id_2 == 631796, cell_id == 16, panel_id == 9)
+plt <- lift_dl(plot_combo)(x)
+
+plt <- lift_dl(plot_combo)(growth_data_bliss_nested[545, ])
+plt
+
+```
+
+```{r bliss_vs_log_kill}
+
+growth_data_bliss <- growth_data_bliss %>%
+  left_join(
+    meta_cell_line
+  ) %>%
+  left_join(
+    select(meta_drugs, lspci_id_1 = lspci_id, pref_name_1 = pref_name)
+  ) %>%
+  left_join(
+    select(meta_drugs, lspci_id_2 = lspci_id, pref_name_2 = pref_name)
+  )
+
+library(rasterly)
+
+plt <- growth_data_bliss %>% 
+  drop_na(gr, excess_killing) %>%
+  rasterly(mapping = aes(x = gr, y = excess_killing), x_range = c(-3, 1.5), y_range = c(-1.5, 1.5)) %>% 
+  rasterly_points(color = viridisLite::inferno(256))
+
+x <- plot(plt, xlab = "GR", ylab = "Excess over Bliss")
+
+library(reticulate)
+
+callr::r(function(df){
+  library(reticulate)
+  Sys.setenv(PYTHONPATH = "", PYTHONHOME = "")
+  use_condaenv("datashader", conda = "/Users/chug/opt/miniconda3/bin/conda", required = TRUE)
+  ds <- import("datashader")
+  cc <- import("colorcet")
+  cvs <- ds$Canvas(plot_width = 1600L, plot_height = 1200L, x_range = c(-3, 1.5), y_range = c(-1.5, 1.5))
+  agg <- cvs$points(df, "gr", "excess_killing")
+  img <- ds$tf$set_background(ds$tf$shade(agg, how = "eq_hist", cmap = cc$fire), "black")
+  ds$utils$export_image(img = img, filename = 'gr_excess_killing.png', fmt = ".png", background = NULL)
+}, show = TRUE, args = list(df = select(growth_data_bliss, gr, excess_killing) %>% drop_na()))
+
+```
+
+
+
+* Net killing vs delta bliss, using all concentrations
+* Or using AUC, adding up all values
+* Stratify by cell line
+* Use GR value for x-axis
+* Range of delta bliss across cell line
+
+* UMAP of AUC values per cell line
