@@ -242,28 +242,133 @@ growth_data_bliss <- growth_data_bliss %>%
     select(meta_drugs, lspci_id_2 = lspci_id, pref_name_2 = pref_name)
   )
 
+growth_data_bliss_auc <- growth_data_bliss %>%
+  group_by(panel_id, cell_id, lspci_id_1, lspci_id_2) %>%
+  summarize(
+    AUC = sum(excess_killing),
+    gr_min = min(gr),
+    .groups = "drop"
+  )
+
 library(rasterly)
 
 plt <- growth_data_bliss %>% 
   drop_na(gr, excess_killing) %>%
-  rasterly(mapping = aes(x = gr, y = excess_killing), x_range = c(-3, 1.5), y_range = c(-1.5, 1.5)) %>% 
+  rasterly(
+    mapping = aes(x = gr, y = excess_killing),
+    plot_width = 1600, plot_height = 1200,
+    x_range = c(-3, 1.5), y_range = c(-1.5, 1.5)
+  ) %>% 
   rasterly_points(color = viridisLite::inferno(256))
 
-x <- plot(plt, xlab = "GR", ylab = "Excess over Bliss")
+plot(plt, xlab = "GR", ylab = "Excess over Bliss")
+x <- rasterlyGrob(plt, xlab = "GR", ylab = "Excess over Bliss")
+grid::grid.draw(x)
+
+plt <- growth_data_bliss_auc %>% 
+  drop_na(gr_min, AUC) %>%
+  rasterly(
+    mapping = aes(x = gr_min, y = AUC),
+    plot_width = 1600, plot_height = 1200,
+    x_range = c(-5, 1.5), y_range = c(-2, 2),
+    background = "black"
+  ) %>% 
+  rasterly_points(color = viridisLite::inferno(256))
+
+x <- rasterlyGrob(plt, xlab = "Minimum GR", ylab = "Bliss AUC")
+grid::grid.draw(x)
 
 library(reticulate)
 
-callr::r(function(df){
-  library(reticulate)
-  Sys.setenv(PYTHONPATH = "", PYTHONHOME = "")
-  use_condaenv("datashader", conda = "/Users/chug/opt/miniconda3/bin/conda", required = TRUE)
-  ds <- import("datashader")
-  cc <- import("colorcet")
-  cvs <- ds$Canvas(plot_width = 1600L, plot_height = 1200L, x_range = c(-3, 1.5), y_range = c(-1.5, 1.5))
-  agg <- cvs$points(df, "gr", "excess_killing")
-  img <- ds$tf$set_background(ds$tf$shade(agg, how = "eq_hist", cmap = cc$fire), "black")
-  ds$utils$export_image(img = img, filename = 'gr_excess_killing.png', fmt = ".png", background = NULL)
-}, show = TRUE, args = list(df = select(growth_data_bliss, gr, excess_killing) %>% drop_na()))
+plot_big_scatter <- function(data, x, y, out, ...) {
+  x_sym <- enquo(x)
+  y_sym <- enquo(y)
+  args <- rlang::list2(...)
+  args[["df"]] <- data %>%
+    select(!!x_sym, !!y_sym) %>%
+    drop_na()
+  args[c("x", "y", "out")] <- c(rlang::as_name(x_sym), rlang::as_name(y_sym), out)
+  callr::r(function(df, x, y, out, ...){
+    library(reticulate)
+    Sys.setenv(PYTHONPATH = "", PYTHONHOME = "")
+    use_condaenv("datashader", conda = "/Users/chug/opt/miniconda3/bin/conda", required = TRUE)
+    ds <- import("datashader")
+    cc <- import("colorcet")
+    cvs <- ds$Canvas(plot_width = 1600L, plot_height = 1200L, ...)
+    agg <- cvs$points(df, x, y)
+    img <- ds$tf$set_background(ds$tf$shade(agg, how = "eq_hist", cmap = cc$fire), "black")
+    ds$utils$export_image(img = img, filename = out, fmt = ".png", background = NULL)
+  }, show = TRUE, args = args)
+}
+
+plot_big_scatter(
+  growth_data_bliss_auc, gr_min, AUC, "gr_min_vs_auc",
+  x_range = c(-3, 1.5), y_range = c(-1.5, 1.5)
+)
+
+plot_big_scatter_interactive <- function(data, x, y, out, ...) {
+  x_sym <- enquo(x)
+  y_sym <- enquo(y)
+  args <- rlang::list2(...)
+  args[["df"]] <- data %>%
+    select(!!x_sym, !!y_sym) %>%
+    drop_na()
+  args[c("x", "y", "out")] <- c(rlang::as_name(x_sym), rlang::as_name(y_sym), out)
+  callr::r(function(df, x, y, out, ...){
+    args <- rlang::list2(...)
+    xlim <- args[["xlim"]]
+    ylim <- args[["ylim"]]
+    library(reticulate)
+    Sys.setenv(PYTHONPATH = "", PYTHONHOME = "")
+    use_condaenv("datashader", conda = "/Users/chug/opt/miniconda3/bin/conda", required = TRUE)
+    ds <- import("datashader")
+    cc <- import("colorcet")
+    mpl <- import("matplotlib")
+    dsmpl <- import("datashader.mpl_ext")
+    plt <- mpl$pyplot
+    plt$rcParams[["font.family"]] = "Helvetica"
+    plt$rcParams[["pdf.fonttype"]] = 42L
+    # hv <- import("holoviews")
+    # hvds <- import("holoviews.operation.datashader")
+    # # mpl <- import("matplotlib")
+    # import("holoviews.plotting.mpl")
+    # cvs <- ds$Canvas(plot_width = 1600L, plot_height = 1200L, ...)
+    # agg <- cvs$points(df, x, y)
+    # img <- ds$tf$set_background(ds$tf$shade(agg, how = "eq_hist", cmap = cc$fire), "black")
+    # ren <- hv$Store$renderers[["matplotlib"]]$instance(fig = "svg", holomap = "gif")
+    # ren$save(img, out)
+    # ds$utils$export_image(img = img, filename = out, fmt = ".png", background = NULL)
+    # hv$extension("bokeh")
+    # hvds$datashade(img)
+    # p <- ds$Pipeline(
+    #   df, ds$Point(x, y), agg = ds$count(),
+    #   color_fn = ft$partial(ds$tf$shade, cc$fire, how = "eq_hist")
+    # )
+    figa <- plt$subplots(figsize = c(12, 8))
+    fig <- figa[[1L]]
+    ax <- figa[[2L]]
+    # da <- dsartist(ax, p)
+    # ax$add_artist(da)
+    art <- dsmpl$dsshow(
+      df, ds$Point(x, y),
+      norm = "eq_hist", cmap="inferno", ax = ax
+    )
+    # ax$set_aspect("auto")
+    ax$set_xlabel(x)
+    ax$set_ylabel(y)
+    # if (!is.null(xlim))
+    #   ax$set_xlim(xlim[[1L]], xlim[[2L]])
+    # if (!is.null(ylim))
+    #   ax$set_ylim(ylim[[1L]], ylim[[2L]])
+    fig$savefig("out.pdf", format = "pdf")
+  }, show = TRUE, args = args)
+}
+
+plot_big_scatter_interactive(
+  growth_data_bliss_auc, gr_min, AUC, "gr_min_vs_auc_2",
+  xlim = c(-3, 1.5), ylim = c(-1.5, 1.5)
+)
+
 
 ```
 
@@ -274,5 +379,6 @@ callr::r(function(df){
 * Stratify by cell line
 * Use GR value for x-axis
 * Range of delta bliss across cell line
+* Plot minimum GR vs excess killing at the same doses
 
 * UMAP of AUC values per cell line
