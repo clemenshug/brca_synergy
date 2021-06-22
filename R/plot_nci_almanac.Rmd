@@ -80,7 +80,7 @@ growth_data_single_dose_agg <- growth_data_single_dose_all %>%
   ) %>%
   compute_metrics()
   
-growth_data_bliss <- growth_data %>%
+growth_data_bliss_raw <- growth_data %>%
   filter(!is.na(lspci_id_2)) %>%
   left_join(
     growth_data_single_dose_agg %>%
@@ -125,7 +125,7 @@ ggsave(
 
 
 ```{r plot_bliss}
-growth_data_bliss_nested <- growth_data_bliss %>%
+growth_data_bliss_nested <- growth_data_bliss_raw %>%
   group_nest(
     panel_id, cell_id, lspci_id_1, lspci_id_2
   ) %>%
@@ -144,14 +144,15 @@ adam_cmap <- c(
   "#EB6820", "#D95330", "#D04445", "#B93B51", "#953565", "#78287E", "#522B6E", "#22152F"
 )
 
-plot_gr <- function(panel_id, cell_id, lspci_ids, highlight_conc = FALSE) {
+plot_gr <- function(panel_id, cell_id, lspci_ids, y = gr, highlight_conc = FALSE) {
+  y_sym <- enquo(y)
   data_agg <- growth_data_single_dose_agg %>%
     filter(panel_id == !!panel_id, cell_id == !!cell_id, lspci_id %in% lspci_ids) %>%
     left_join(meta_drugs)
   data_all <- growth_data_single_dose_all %>%
     filter(panel_id == !!panel_id, cell_id == !!cell_id, lspci_id %in% lspci_ids) %>%
     left_join(meta_drugs)
-  plt <- ggplot(data_agg, aes(drug_concentration, gr)) +
+  plt <- ggplot(data_agg, aes(drug_concentration, !!y_sym)) +
     geom_line(color = "gray") +
     geom_beeswarm(data = data_all, groupOnX = TRUE) +
     scale_x_log10() +
@@ -163,16 +164,18 @@ plot_gr <- function(panel_id, cell_id, lspci_ids, highlight_conc = FALSE) {
     conc_data <- growth_data_bliss_nested %>%
       filter(lspci_id_1 == lspci_ids[1], lspci_id_2 == lspci_ids[2]) %>%
       chuck("data", 1)
-    plt <- plt +
+    plt$layers <- c(
       geom_linerange(
         aes(x = drug_concentration, y = NULL), ymin = -Inf, ymax = Inf,
+        color = "gray50",
         data = bind_rows(
           transmute(conc_data, lspci_id = lspci_ids[1], drug_concentration = drug_concentration_1),
           transmute(conc_data, lspci_id = lspci_ids[2], drug_concentration = drug_concentration_2),
         ) %>%
           distinct() %>%
           left_join(meta_drugs)
-      )
+      ), plt$layers
+    )
   }
   plt
 }
@@ -218,20 +221,21 @@ plot_combo <- function(...) {
     (
       plot_bliss_l(args, fill_var = "fraction_killing") + labs(title = NULL) |
       plot_bliss_l(args, fill_var = "fraction_killing_bliss_expected") + labs(title = NULL, y = NULL)
-    ) / plot_gr(args$panel_id, args$cell_id, c(args$lspci_id_1, args$lspci_id_2), highlight_conc = TRUE)
+    ) / plot_gr(args$panel_id, args$cell_id, c(args$lspci_id_1, args$lspci_id_2), highlight_conc = TRUE) /
+      plot_gr(args$panel_id, args$cell_id, c(args$lspci_id_1, args$lspci_id_2), y = log_killing, highlight_conc = TRUE)
   plt
 }
 x <- growth_data_bliss_nested %>% filter(lspci_id_1 == 487093, lspci_id_2 == 631796, cell_id == 16, panel_id == 9)
 plt <- lift_dl(plot_combo)(x)
 
-plt <- lift_dl(plot_combo)(growth_data_bliss_nested[545, ])
+plt <- lift_dl(plot_combo)(growth_data_bliss_nested[4, ])
 plt
 
 ```
 
 ```{r bliss_vs_log_kill}
 
-growth_data_bliss <- growth_data_bliss %>%
+growth_data_bliss <- growth_data_bliss_raw %>%
   left_join(
     meta_cell_line
   ) %>%
@@ -246,133 +250,265 @@ growth_data_bliss_auc <- growth_data_bliss %>%
   group_by(panel_id, cell_id, lspci_id_1, lspci_id_2) %>%
   summarize(
     AUC = sum(excess_killing),
-    gr_min = min(gr),
+    gr_min = min(gr, na.rm = TRUE),
+    gr_mean = mean(gr, na.rm = TRUE),
+    excess_killing_gr_min = mean(excess_killing[gr == min(gr, na.rm = TRUE)]),
+    log_killing_max = max(log_killing, na.rm = TRUE),
+    excess_killing_log_killing_max =  mean(excess_killing[log_killing == max(log_killing, na.rm = TRUE)]),
     .groups = "drop"
   )
 
 library(rasterly)
 
-plt <- growth_data_bliss %>% 
-  drop_na(gr, excess_killing) %>%
-  rasterly(
-    mapping = aes(x = gr, y = excess_killing),
-    plot_width = 1600, plot_height = 1200,
-    x_range = c(-3, 1.5), y_range = c(-1.5, 1.5)
-  ) %>% 
-  rasterly_points(color = viridisLite::inferno(256))
-
-plot(plt, xlab = "GR", ylab = "Excess over Bliss")
-x <- rasterlyGrob(plt, xlab = "GR", ylab = "Excess over Bliss")
-grid::grid.draw(x)
-
-plt <- growth_data_bliss_auc %>% 
-  drop_na(gr_min, AUC) %>%
-  rasterly(
-    mapping = aes(x = gr_min, y = AUC),
-    plot_width = 1600, plot_height = 1200,
-    x_range = c(-5, 1.5), y_range = c(-2, 2),
-    background = "black"
-  ) %>% 
-  rasterly_points(color = viridisLite::inferno(256))
-
-x <- rasterlyGrob(plt, xlab = "Minimum GR", ylab = "Bliss AUC")
-grid::grid.draw(x)
-
-library(reticulate)
-
-plot_big_scatter <- function(data, x, y, out, ...) {
+plot_scatter_rasterly <- function(data, x, y, out, out_dir = dir_res, ...) {
+  args <- rlang::list2(...)
   x_sym <- enquo(x)
   y_sym <- enquo(y)
-  args <- rlang::list2(...)
-  args[["df"]] <- data %>%
+  df <- data %>%
     select(!!x_sym, !!y_sym) %>%
     drop_na()
-  args[c("x", "y", "out")] <- c(rlang::as_name(x_sym), rlang::as_name(y_sym), out)
-  callr::r(function(df, x, y, out, ...){
-    library(reticulate)
-    Sys.setenv(PYTHONPATH = "", PYTHONHOME = "")
-    use_condaenv("datashader", conda = "/Users/chug/opt/miniconda3/bin/conda", required = TRUE)
-    ds <- import("datashader")
-    cc <- import("colorcet")
-    cvs <- ds$Canvas(plot_width = 1600L, plot_height = 1200L, ...)
-    agg <- cvs$points(df, x, y)
-    img <- ds$tf$set_background(ds$tf$shade(agg, how = "eq_hist", cmap = cc$fire), "black")
-    ds$utils$export_image(img = img, filename = out, fmt = ".png", background = NULL)
-  }, show = TRUE, args = args)
+  # plt <- df %>%
+  #   rasterly(
+  #     mapping = aes(x = !!x_sym, y = !!y_sym),
+  #     plot_width = 1600, plot_height = 1200,
+  #     drop_data = TRUE,
+  #     ...
+  #   ) %>% 
+  #   rasterly_points(color = viridisLite::inferno(256))
+  
+  # gr <- rasterlyGrob(
+  #   plt,
+  #   xlab = args$xlab %||% rlang::as_name(x_sym),
+  #   ylab = args$ylab %||% rlang::as_name(y_sym)
+  # )
+  plt <- ggRasterly(
+    df, mapping = aes(x = !!x_sym, y = !!y_sym),
+    plot_width = 1600, plot_height = 1200,
+    shape = 16,
+    color = viridisLite::inferno(256),
+    ...
+  ) +
+    labs(x = args$xlab %||% rlang::as_name(x_sym), y = args$ylab %||% rlang::as_name(y_sym)) +
+    scale_color_viridis_c(trans = "log10", option = "inferno") +
+    theme_minimal()
+  ggsave(
+    file.path(out_dir, paste0(out, ".pdf")), plt,
+    width = 12, height = 8
+  )
 }
 
-plot_big_scatter(
-  growth_data_bliss_auc, gr_min, AUC, "gr_min_vs_auc",
-  x_range = c(-3, 1.5), y_range = c(-1.5, 1.5)
-)
-
-plot_big_scatter_interactive <- function(data, x, y, out, ...) {
+plot_scatter_rasterly_2 <- function(data, x, y, out, out_dir = dir_res, ...) {
+  args <- rlang::list2(...)
   x_sym <- enquo(x)
   y_sym <- enquo(y)
-  args <- rlang::list2(...)
-  args[["df"]] <- data %>%
+  df <- data %>%
     select(!!x_sym, !!y_sym) %>%
     drop_na()
-  args[c("x", "y", "out")] <- c(rlang::as_name(x_sym), rlang::as_name(y_sym), out)
-  callr::r(function(df, x, y, out, ...){
-    args <- rlang::list2(...)
-    xlim <- args[["xlim"]]
-    ylim <- args[["ylim"]]
-    library(reticulate)
-    Sys.setenv(PYTHONPATH = "", PYTHONHOME = "")
-    use_condaenv("datashader", conda = "/Users/chug/opt/miniconda3/bin/conda", required = TRUE)
-    ds <- import("datashader")
-    cc <- import("colorcet")
-    mpl <- import("matplotlib")
-    dsmpl <- import("datashader.mpl_ext")
-    plt <- mpl$pyplot
-    plt$rcParams[["font.family"]] = "Helvetica"
-    plt$rcParams[["pdf.fonttype"]] = 42L
-    # hv <- import("holoviews")
-    # hvds <- import("holoviews.operation.datashader")
-    # # mpl <- import("matplotlib")
-    # import("holoviews.plotting.mpl")
-    # cvs <- ds$Canvas(plot_width = 1600L, plot_height = 1200L, ...)
-    # agg <- cvs$points(df, x, y)
-    # img <- ds$tf$set_background(ds$tf$shade(agg, how = "eq_hist", cmap = cc$fire), "black")
-    # ren <- hv$Store$renderers[["matplotlib"]]$instance(fig = "svg", holomap = "gif")
-    # ren$save(img, out)
-    # ds$utils$export_image(img = img, filename = out, fmt = ".png", background = NULL)
-    # hv$extension("bokeh")
-    # hvds$datashade(img)
-    # p <- ds$Pipeline(
-    #   df, ds$Point(x, y), agg = ds$count(),
-    #   color_fn = ft$partial(ds$tf$shade, cc$fire, how = "eq_hist")
-    # )
-    figa <- plt$subplots(figsize = c(12, 8))
-    fig <- figa[[1L]]
-    ax <- figa[[2L]]
-    # da <- dsartist(ax, p)
-    # ax$add_artist(da)
-    art <- dsmpl$dsshow(
-      df, ds$Point(x, y),
-      norm = "eq_hist", cmap="inferno", ax = ax
-    )
-    # ax$set_aspect("auto")
-    ax$set_xlabel(x)
-    ax$set_ylabel(y)
-    # if (!is.null(xlim))
-    #   ax$set_xlim(xlim[[1L]], xlim[[2L]])
-    # if (!is.null(ylim))
-    #   ax$set_ylim(ylim[[1L]], ylim[[2L]])
-    fig$savefig("out.pdf", format = "pdf")
-  }, show = TRUE, args = args)
+  plt <- df %>%
+    rasterly(
+      mapping = aes(x = !!x_sym, y = !!y_sym),
+      plot_width = 1600, plot_height = 1200,
+      ...
+    ) %>%
+    rasterly_points(color = viridisLite::inferno(256)) %>%
+    rasterly_build()
+  # sum_mat <- plt$agg[[1]][[1]]
+  # sum_mat[sum_mat == 0] <- NA_real_
+  # sum_df <- sum_mat %>%
+    
+  # df %>%
+  #   ggplot(aes(!!x_sym, !!y_sym, fill = after_stat(count))) +
+  #   stat_density_2d(geom = "raster")
+  
+  # gr <- rasterlyGrob(
+  #   plt,
+  #   xlab = args$xlab %||% rlang::as_name(x_sym),
+  #   ylab = args$ylab %||% rlang::as_name(y_sym)
+  # )
+  # plt <- ggRasterly(
+  #   df, mapping = aes(x = !!x_sym, y = !!y_sym),
+  #   plot_width = 1600, plot_height = 1200,
+  #   shape = 16,
+  #   # color = viridisLite::inferno(256),
+  #   ...
+  # ) +
+  #   labs(x = args$xlab %||% rlang::as_name(x_sym), y = args$ylab %||% rlang::as_name(y_sym)) +
+  #   scale_color_viridis_c(trans = "log10", option = "inferno") +
+  #   theme_minimal()
+  # ggsave(
+  #   file.path(out_dir, paste0(out, ".pdf")), plt,
+  #   width = 12, height = 8
+  # )
 }
 
-plot_big_scatter_interactive(
-  growth_data_bliss_auc, gr_min, AUC, "gr_min_vs_auc_2",
-  xlim = c(-3, 1.5), ylim = c(-1.5, 1.5)
+plot_scatter_rasterly_3 <- function(data, x, y, out, out_dir = dir_res, ...) {
+  args <- rlang::list2(...)
+  x_sym <- enquo(x)
+  y_sym <- enquo(y)
+  df <- data %>%
+    select(!!x_sym, !!y_sym) %>%
+    drop_na()
+
+  df %>%
+    ggplot(aes(!!x_sym, !!y_sym)) +
+    stat_bin_2d(geom = "raster", bins = c(1200, 1600)) +
+    lims(x = args$x_range, y = args$y_range) +
+    labs(x = args$xlab %||% rlang::as_name(x_sym), y = args$ylab %||% rlang::as_name(y_sym)) +
+    scale_fill_viridis_c(trans = "log10", option = "inferno") +
+    theme_minimal()
+
+  ggsave(
+    file.path(out_dir, paste0(out, ".pdf")), plt,
+    width = 12, height = 8
+  )
+}
+
+plt <- plot_scatter_rasterly_3(
+  growth_data_bliss, gr, excess_killing, "nci_almanac_gr_vs_excess_killing_scatter_2.pdf",
+  x_range = c(1.5, -3), y_range = c(-2, 2),
+  xlab = "GR", ylab = "Delta Bliss"
 )
 
+plot_scatter_rasterly(
+  growth_data_bliss, gr, excess_killing, "nci_almanac_gr_vs_excess_killing_scatter_2.pdf",
+  x_range = c(1.5, -3), y_range = c(-2, 2),
+  xlab = "GR", ylab = "Delta Bliss"
+)
+
+plot_scatter_rasterly(
+  growth_data_bliss_auc, gr_min, AUC, "nci_almanac_gr_min_vs_auc_scatter.pdf",
+  x_range = c(-2, 1.5), y_range = c(-5, 5),
+  xlab = "GR min", ylab = "Delta Bliss AUC"
+)
+
+plot_scatter_rasterly(
+  growth_data_bliss_auc, gr_mean, AUC, "nci_almanac_gr_mean_vs_auc_scatter.pdf",
+  x_range = c(-0.5, 1.5), y_range = c(-5, 5),
+  xlab = "GR mean", ylab = "Delta Bliss AUC"
+)
+
+plot_scatter_rasterly(
+  growth_data_bliss_auc, gr_min, AUC, "nci_almanac_gr_min_vs_auc_scatter.pdf",
+  x_range = c(-2, 1.5), y_range = c(-5, 5),
+  xlab = "GR min", ylab = "Delta Bliss AUC"
+)
+
+ plot_scatter_rasterly(
+  growth_data_bliss_auc, gr_min, excess_killing_gr_min, "nci_almanac_gr_min_vs_excess_killing_gr_min.pdf",
+  x_range = c(-2, 1.5), y_range = c(-1, 1),
+  xlab = "GR min", ylab = "Delta Bliss at GR min"
+)
+
+
+plot_scatter_rasterly(
+  growth_data_bliss_auc, log_killing_max, excess_killing_log_killing_max, "nci_almanac_log_killing_max_vs_exces_killing_log_killing_max.pdf",
+  x_range = c(-0.2, 2), y_range = c(-1, 1),
+  xlab = "Max log killing", ylab = "Delta Bliss at max log killing"
+)
+
+
+## By cell line
+dir_res_by_cell <- file.path(dir_res, "by_cell_line")
+dir.create(dir_res_by_cell, showWarnings = FALSE)
+
+growth_data_bliss %>%
+  distinct(panel_id, cell_id) %>%
+  pwalk(
+    function(panel_id, cell_id) {
+      cell_info <- meta_cell_line %>%
+        mutate(across(c(cell_name, panel_name), str_replace_all, r"([^\w])", "_")) %>%
+        filter(cell_id == !!cell_id, panel_id == !!panel_id) %>% {
+          paste(.$panel_name, .$cell_name, sep = "_")
+        }
+      
+      plot_scatter_rasterly(
+        filter(growth_data_bliss, cell_id == !!cell_id, panel_id == !!panel_id),
+        gr, excess_killing, paste0("nci_almanac_", cell_info, "_gr_vs_excess_killing_scatter.pdf"),
+        x_range = c(1.5, -3), y_range = c(-2, 2),
+        xlab = "GR", ylab = "Delta Bliss",
+        out_dir = dir_res_by_cell
+      )
+      
+      df_auc <- filter(growth_data_bliss_auc, cell_id == !!cell_id, panel_id == !!panel_id)
+      plot_scatter_rasterly(
+        df_auc, gr_min, AUC, paste0("nci_almanac_", cell_info, "_gr_min_vs_auc_scatter.pdf"),
+        x_range = c(-2, 1.5), y_range = c(-5, 5),
+        xlab = "GR min", ylab = "Delta Bliss AUC",
+        out_dir = dir_res_by_cell
+      )
+      
+      plot_scatter_rasterly(
+        df_auc, gr_mean, AUC, paste0("nci_almanac_", cell_info, "_gr_mean_vs_auc_scatter.pdf"),
+        x_range = c(-0.5, 1.5), y_range = c(-5, 5),
+        xlab = "GR mean", ylab = "Delta Bliss AUC",
+        out_dir = dir_res_by_cell
+      )
+      
+      plot_scatter_rasterly(
+        df_auc, gr_min, AUC, paste0("nci_almanac_", cell_info, "_gr_min_vs_auc_scatter.pdf"),
+        x_range = c(-2, 1.5), y_range = c(-5, 5),
+        xlab = "GR min", ylab = "Delta Bliss AUC",
+        out_dir = dir_res_by_cell
+      )
+      
+       plot_scatter_rasterly(
+        df_auc, gr_min, excess_killing_gr_min, paste0("nci_almanac_", cell_info, "_gr_min_vs_excess_killing_gr_min.pdf"),
+        x_range = c(-2, 1.5), y_range = c(-1, 1),
+        xlab = "GR min", ylab = "Delta Bliss at GR min",
+        out_dir = dir_res_by_cell
+      )
+      
+      plot_scatter_rasterly(
+        df_auc, log_killing_max, excess_killing_log_killing_max, paste0("nci_almanac_", cell_info, "_log_killing_max_vs_exces_killing_log_killing_max.pdf"),
+        x_range = c(-0.2, 2), y_range = c(-1, 1),
+        xlab = "Max log killing", ylab = "Delta Bliss at max log killing",
+        out_dir = dir_res_by_cell
+      )
+    }
+  )
 
 ```
 
 
+```{r umap}
+library(umap)
+
+get_mat <- function(df, var) {
+  var_sym <- enquo(var)
+  df_long <- df %>%
+    transmute(
+      panel_cell_id = paste(panel_id, cell_id, sep = "_"),
+      lspci_id_combo = paste(lspci_id_1, lspci_id_2, sep = "_"),
+      !!var_sym
+    )
+  df_wide <- df_long %>%
+    pivot_wider(names_from = lspci_id_combo, values_from = !!var_sym)
+  mat <- df_wide %>%
+    column_to_rownames("panel_cell_id") %>%
+    as.matrix()
+  mat
+}
+
+impute_mat <- function(mat, ...) {
+  # imp_formula <- reformulate(paste0("`", colnames(mat), "`"))
+  # Hmisc::aregImpute(
+  #   imp_formula, data = as.data.frame(mat), n.impute = 5, ...
+  # )
+  VIM::kNN(mat, ...)
+}
+
+gr_min_mat <- get_mat(growth_data_bliss_auc, gr_min)
+gr_min_mat_imp <- impute_mat(gr_min_mat)
+  
+
+umap_gr_min <- umap(
+  growth_data_bliss_auc %>%
+    transmute(panel_cell_id = paste(panel_id, cell_id, sep = ":"), lspci_id_1, lspci_id_2, gr_min) %>%
+    pivot_wider(names_from = panel_cell_id, values_from = gr_min) %>%
+    select(-starts_with("lspci_id")) %>%
+    as.matrix()
+)
+```
 
 * Net killing vs delta bliss, using all concentrations
 * Or using AUC, adding up all values
