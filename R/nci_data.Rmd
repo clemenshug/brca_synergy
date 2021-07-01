@@ -129,7 +129,9 @@ Score             NUMBER(4)       score, for combination records
 cell_line_meta <- nci_almanac_raw %>%
   distinct(
     panel_id = PANELNBR, cell_id = CELLNBR, panel_name = PANEL, cell_name = CELLNAME
-  )
+  ) %>%
+  # Remove duplicate SF-539 entry
+  filter(cell_name != "SF-539\u001a")
 
 write_csv(
   cell_line_meta,
@@ -138,6 +140,10 @@ write_csv(
 
 nci_almanac <- nci_almanac_raw %>%
   select(
+    study_location = SCREENER,
+    study_id = STUDY,
+    experiment_date = TESTDATE,
+    plate_id = PLATE,
     # All concentrations are in M, leaving column out
     panel_id = PANELNBR,
     cell_id = CELLNBR,
@@ -179,7 +185,7 @@ activity <- synapser::Activity(
   executed = "https://github.com/clemenshug/brca_synergy/blob/main/R/nci_data.Rmd"
 )
 
-syn_project <- "syn25882516"
+syn_project <- "syn25859223"
 syn_nci <- synExtra::synMkdir(syn_project, "data", "nci", .recursive = TRUE)
 
 c(
