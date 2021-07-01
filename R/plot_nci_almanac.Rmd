@@ -20,7 +20,7 @@ dir_res <- here("nci")
 dir.create(dir_res, showWarnings = FALSE)
 
 synapser::synLogin()
-syn <- synExtra::synDownloader(dir_data)
+syn <- synExtra::synDownloader(dir_data, ifcollision = "overwrite.local")
 ```
 
 ## Load data from Synapse
@@ -47,18 +47,97 @@ ExpectedGrowth    NUMBER          expected percent growth for combination,
 based on values for individual drugs
 Score             NUMBER(4)       score, for combination records
 
+```{r qc}
+StatPercentileX <- ggproto("StatPercentileX", Stat,
+  compute_group = function(data, scales, probs) {
+    percentiles <- quantile(data$x, probs=probs)
+    data.frame(xintercept=percentiles, x=percentiles)
+    },
+  required_aes = c("x")
+)
+
+stat_percentile_x <- function(mapping = NULL, data = NULL, geom = "vline",
+                              position = "identity", na.rm = FALSE,
+                              show.legend = NA, inherit.aes = TRUE, ...) {
+  layer(
+    stat = StatPercentileX, data = data, mapping = mapping, geom = geom, 
+    position = position, show.legend = show.legend, inherit.aes = inherit.aes,
+    params = list(na.rm = na.rm, ...)
+  )
+}
+
+diagnostic_histogram <- function(df, x) {
+  x_sym <- enquo(x)
+  df %>%
+    ggplot(aes(!!x_sym)) +
+      stat_percentile_x(geom = "linerange", ymin = -0.05, ymax = 0, probs = seq(.1, 0.9, by = 0.1), color = "red") +
+      # geom_linerange(
+      #   aes(q, ymin = -0.05, ymax = 0),
+      #   data = ~quantile(.x[[rlang::as_name(x_sym)]], seq(.1, 0.9, by = 0.1), na.rm = TRUE) %>%
+      #     enframe("quantile", "q"),
+      #   color = "red"
+      # ) +
+      geom_histogram(aes(y = stat(ndensity)), bins = 50)
+      # geom_density(color = "red")
+}
+
+plt <- growth_data_raw %>%
+  diagnostic_histogram(CONTROLVALUE) +
+  scale_x_log10() +
+  facet_wrap(vars(study_location))
+ggsave(file.path(dir_res, "nci_almanac_CONTROLVALUE_histogram.pdf"), plt, width = 9, height = 3)
+
+plt <- growth_data_raw %>%
+  diagnostic_histogram(TESTVALUE) +
+  scale_x_log10() +
+  facet_wrap(vars(study_location))
+ggsave(file.path(dir_res, "nci_almanac_TESTVALUE_histogram.pdf"), plt, width = 9, height = 3)
+
+plt <- growth_data_raw %>%
+  diagnostic_histogram(TZVALUE) +
+  scale_x_log10() +
+  facet_wrap(vars(study_location))
+ggsave(file.path(dir_res, "nci_almanac_TZVALUE_histogram.pdf"), plt, width = 9, height = 3)
+
+plt <- growth_data_raw %>%
+  count(study_location, measurement_type = if_else(is.na(lspci_id_2), "single_agent", "combination")) %>%
+  ggplot(aes(study_location, n, fill = measurement_type)) +
+    geom_col(position = "dodge")
+ggsave(file.path(dir_res, "nci_almanac_study_location_counts.pdf"), plt, width = 5, height = 3)
+
+
+growth_data_raw %>%
+  group_by(
+    lspci_id_1, measurement_type = if_else(is.na(lspci_id_2), "single_agent", "combination")
+  ) %>%
+  summarize(n_locations = length(unique(study_location)), measurement_types = .groups = "drop")
+```
+
+
+
 ```{r gr}
 compute_metrics <- function(data) {
   mutate(
     data,
+    # fraction_killing = pmax(0, 1 - (TESTVALUE / CONTROLVALUE)),
+    # log_kills = pmax(0, log10(CONTROLVALUE / TESTVALUE)),
     fraction_killing = 1 - (TESTVALUE / CONTROLVALUE),
-    log_killing = log10(CONTROLVALUE / TESTVALUE),
+    log_kills = log10(CONTROLVALUE / TESTVALUE),
     gr = log2(TESTVALUE / TZVALUE) / log2(CONTROLVALUE / TZVALUE),
     gr_bound = 2**gr - 1
   )
 }
 
 growth_data <- growth_data_raw %>%
+  # # Remove data with extremely low control or time zero counts
+  # # Actually, even the low values seem to be fine. They result from
+  # # a different protocol being used by one of the study centers
+  # # So we only have to filter for negative values
+  # filter(
+  #   CONTROLVALUE > 1e3,
+  #   TZVALUE > 1e3
+  # ) %>%
+  filter(TESTVALUE > 0) %>%
   compute_metrics()
 
 growth_data_single_dose_all <- growth_data %>%
@@ -69,7 +148,8 @@ growth_data_single_dose_all <- growth_data %>%
     drug_concentration = drug_concentration_1,
     ends_with("killing"),
     ends_with("VALUE"),
-    starts_with("gr")
+    starts_with("gr"),
+    contains("kills")
   )
 
 growth_data_single_dose_agg <- growth_data_single_dose_all %>%
@@ -100,29 +180,20 @@ growth_data_bliss_raw <- growth_data %>%
   ) %>%
   mutate(
     fraction_killing_bliss_expected = fraction_killing_1 + fraction_killing_2 - fraction_killing_1 * fraction_killing_2,
-    excess_killing = log10(1 - fraction_killing_bliss_expected) - log10(1 - fraction_killing)
+    excess_bliss = log10(1 - fraction_killing_bliss_expected) - log10(1 - fraction_killing),
+    log_kills_bliss_expected = log10(1 / (1 - fraction_killing_bliss_expected))
   )
-```
 
-```{r gr_descriptive}
-plt <- growth_data_gr %>%
-  ggplot(aes(gr)) +
-     geom_linerange(
-      aes(q, ymin = -0.3, ymax = 0),
-      data = ~quantile(.x$gr, seq(.1, 0.9, by = 0.1)) %>%
-        enframe("quantile", "q")
-    ) +
-    geom_histogram(aes(y = stat(density))) +
-    geom_density(color = "red") +
-    lims(x = c(-2, NA))
+plt <- growth_data %>%
+  diagnostic_histogram(gr) +
+    lims(x = c(-2, NA)) +
+    facet_wrap(vars(study_location))
 
 ggsave(
-  file.path(dir_res, "desc_gr_histogram.pdf"), plt,
-  width = 4, height = 2
+  file.path(dir_res, "nci_almanac_gr_histogram.pdf"), plt,
+  width = 6, height = 3
 )
-
 ```
-
 
 ```{r plot_bliss}
 growth_data_bliss_nested <- growth_data_bliss_raw %>%
@@ -197,15 +268,18 @@ plot_bliss <- function(..., fill_var = NULL) {
       y = paste(args$pref_name_2, "concentration"),
     ) +
     theme_minimal()
-  if (fill_var %in% c("excess_killing"))
+  if (fill_var %in% c("excess_bliss"))
     plt <- plt + scale_fill_distiller(type = "div", palette = "RdBu", limits = c(-1, 1) * max(abs(data[[fill_var]])))
   else if (fill_var %in% c("gr"))
     # plt <- plt + scale_fill_viridis_c(option = "inferno", limits = c(-1.5, 1))
-    plt <- plt + scale_fill_gradientn(colors = rev(adam_cmap), limits = c(-1.5, 1))
-  else if (str_starts(fill_var, fixed("fraction_killing")) | fill_var %in% c("log_killing"))
+    plt <- plt + scale_fill_gradientn(colors = rev(adam_cmap), limits = c(NA, 1), oob = scales::squish)
+  else if (str_starts(fill_var, fixed("fraction_killing")))
     plt <- plt +
       scale_fill_viridis_c(direction = -1, trans = "log2", breaks = scales::log_breaks(base = 2))
       # scale_fill_gradientn(colors = pals::parula(100), trans = "log2", breaks = scales::log_breaks(base = 2))
+  else if (str_starts(fill_var, fixed("log_kills")))
+    plt <- plt +
+      scale_fill_viridis_c(direction = -1, limits = c(0, NA), oob = scales::squish)
   plt
 }
 
@@ -215,25 +289,34 @@ plot_combo <- function(...) {
   plot_bliss_l <- lift_dl(plot_bliss)
   
   plt <- (
-      plot_bliss_l(args, fill_var = "excess_killing") + labs(x = NULL) |
+      plot_bliss_l(args, fill_var = "excess_bliss") + labs(x = NULL) |
       plot_bliss_l(args, fill_var = "gr") + labs(title = NULL, x = NULL, y = NULL)
     ) /
     (
-      plot_bliss_l(args, fill_var = "fraction_killing") + labs(title = NULL) |
-      plot_bliss_l(args, fill_var = "fraction_killing_bliss_expected") + labs(title = NULL, y = NULL)
+      plot_bliss_l(args, fill_var = "log_kills") + labs(title = NULL) |
+      plot_bliss_l(args, fill_var = "log_kills_bliss_expected") + labs(title = NULL, y = NULL)
     ) / plot_gr(args$panel_id, args$cell_id, c(args$lspci_id_1, args$lspci_id_2), highlight_conc = TRUE) /
-      plot_gr(args$panel_id, args$cell_id, c(args$lspci_id_1, args$lspci_id_2), y = log_killing, highlight_conc = TRUE)
+      plot_gr(args$panel_id, args$cell_id, c(args$lspci_id_1, args$lspci_id_2), y = log_kills, highlight_conc = TRUE)
   plt
 }
 x <- growth_data_bliss_nested %>% filter(lspci_id_1 == 487093, lspci_id_2 == 631796, cell_id == 16, panel_id == 9)
 plt <- lift_dl(plot_combo)(x)
 
-plt <- lift_dl(plot_combo)(growth_data_bliss_nested[4, ])
+plt <- lift_dl(plot_combo)(growth_data_bliss_nested[999, ])
 plt
 
+growth_data_bliss%>%
+  filter(panel_id == 6) %>%
+  arrange(desc(excess_bliss)) %>%
+  head() %>%
+  select(starts_with("lspci_id"), ends_with("id"))
+
+x <- growth_data_bliss_nested %>% filter(lspci_id_1 == 4870, lspci_id_2 == 105149, cell_id == 5, panel_id == 6)
+plt <- lift_dl(plot_combo)(x)
 ```
 
 ```{r bliss_vs_log_kill}
+
 
 growth_data_bliss <- growth_data_bliss_raw %>%
   left_join(
@@ -246,56 +329,133 @@ growth_data_bliss <- growth_data_bliss_raw %>%
     select(meta_drugs, lspci_id_2 = lspci_id, pref_name_2 = pref_name)
   )
 
-growth_data_bliss_auc <- growth_data_bliss %>%
-  group_by(panel_id, cell_id, lspci_id_1, lspci_id_2) %>%
-  summarize(
-    AUC = sum(excess_killing),
-    gr_min = min(gr, na.rm = TRUE),
-    gr_mean = mean(gr, na.rm = TRUE),
-    excess_killing_gr_min = mean(excess_killing[gr == min(gr, na.rm = TRUE)]),
-    log_killing_max = max(log_killing, na.rm = TRUE),
-    excess_killing_log_killing_max =  mean(excess_killing[log_killing == max(log_killing, na.rm = TRUE)]),
-    .groups = "drop"
+ calc_summary_stats <- function(sum_fn, col, name) {
+  growth_data_bliss %>%
+    group_by(panel_id, cell_id, lspci_id_1, lspci_id_2) %>%
+    mutate(
+      is_selected = sum_fn(!!col, na.rm = TRUE) == !!col,
+      excess_bliss_auc = sum(excess_bliss),
+      gr_mean = mean(gr)
+    ) %>%
+    arrange(
+      desc(is_selected),
+      desc(drug_concentration_1 + drug_concentration_2),
+      .by_group = TRUE
+    ) %>%
+    slice_head(n = 1) %>%
+    ungroup()
+}
+
+growth_data_bliss_agg_nested <- tribble(
+  ~sum_fn, ~col, ~name,
+  min, quo(gr), "gr_min",
+  max, quo(log_kills), "log_kills_max",
+) %>%
+  mutate(data = pmap(., calc_summary_stats))
+
+growth_data_bliss_agg <- growth_data_bliss_agg_nested %>%
+  select(agg_name = name, data) %>%
+  unnest(data) %>%
+  select(
+    agg_name, panel_id, cell_id, starts_with("lspci_id"),
+    starts_with("gr"), starts_with("excess_bliss"),
+    starts_with("log_kills"), starts_with("fraction_killing")
+  ) %>%
+  pivot_longer(
+    c(starts_with("gr"), starts_with("excess_bliss"),
+    starts_with("log_kills"), starts_with("fraction_killing"), -gr_mean, -excess_bliss_auc)
+  ) %>%
+  mutate(name = paste(name, agg_name, sep = "_")) %>%
+  select(-agg_name) %>%
+  pivot_wider(
+    names_from = name, values_from = value
   )
+  # select(
+  #   agg_name, panel_id, cell_id, starts_with("lspci_id"),
+    # starts_with("gr"), starts_with("excess_bliss"),
+    # starts_with("log_kills"), starts_with("fraction_killing")
+  # ) %>%
+  # pivot_wider(
+  #   names_from = 
+  # )
+  # transmute(
+  #   data = map2(
+  #     data, agg_name, ~rename_with(
+  #       .x,
+  #       .cols = c(starts_with("gr"), starts_with("excess_bliss"),
+  #         starts_with("log_kills"), starts_with("fraction_killing")),
+  #       .fn = paste, .y, sep = "_"
+  #     ) %>%
+  #   )
+  # )
+  # unnest(data)
+
+# growth_data_bliss %>%
+#   group_by(panel_id, cell_id, lspci_id_1, lspci_id_2) %>%
+#   summarize(
+#     # AUC = sum(excess_bliss),
+#     # across(
+#       # c(starts_with("gr"), starts_with("excess_bliss"),
+#       #   starts_with("log_kills"), starts_with("fraction_killing"),
+#     #     function(x) {
+#     #       
+#     #     }
+#     # )
+#     gr_min = min(gr, na.rm = TRUE),
+#     gr_mean = mean(gr, na.rm = TRUE),
+#     gr_mid = gr[drug_concentration_index_1 == 2 & drug_concentration_index_2 == 2],
+#     excess_bliss_gr_mid = excess_bliss[drug_concentration_index_1 == 2 & drug_concentration_index_2 == 2],
+#     excess_bliss_gr_min = mean(excess_bliss[gr == gr_min]),
+#     excess_bliss_mean = mean(excess_bliss),
+#     log_kills_max = max(log_kills, na.rm = TRUE),
+#     excess_bliss_log_kills_max =  mean(excess_bliss[log_kills == log_kills_max]),
+#     fraction_killing_gr_min = fraction_killing[gr == gr_min],
+#     fraction_killing_1_gr_min = fraction_killing_1[gr == gr_min],
+#     fraction_killing_2_gr_min = fraction_killing_1[gr == gr_min],
+#     .groups = "drop"
+#   )
 
 library(rasterly)
-
-plot_scatter_rasterly <- function(data, x, y, out, out_dir = dir_res, ...) {
+plot_scatter_rasterly <- function(
+  data, x, y, out, out_dir = dir_res, x_range = NULL, y_range = NULL, ...
+) {
   args <- rlang::list2(...)
   x_sym <- enquo(x)
   y_sym <- enquo(y)
   df <- data %>%
-    select(!!x_sym, !!y_sym) %>%
+    # select(!!x_sym, !!y_sym) %>%
     drop_na()
-  # plt <- df %>%
-  #   rasterly(
-  #     mapping = aes(x = !!x_sym, y = !!y_sym),
-  #     plot_width = 1600, plot_height = 1200,
-  #     drop_data = TRUE,
-  #     ...
-  #   ) %>% 
-  #   rasterly_points(color = viridisLite::inferno(256))
-  
-  # gr <- rasterlyGrob(
-  #   plt,
-  #   xlab = args$xlab %||% rlang::as_name(x_sym),
-  #   ylab = args$ylab %||% rlang::as_name(y_sym)
-  # )
-  plt <- ggRasterly(
-    df, mapping = aes(x = !!x_sym, y = !!y_sym),
-    plot_width = 1600, plot_height = 1200,
-    shape = 16,
-    color = viridisLite::inferno(256),
-    ...
-  ) +
-    labs(x = args$xlab %||% rlang::as_name(x_sym), y = args$ylab %||% rlang::as_name(y_sym)) +
+  plt <- df %>%
+    rasterly(
+      mapping = aes(x = !!x_sym, y = !!y_sym),
+      plot_width = args$plot_width %||% 1600, plot_height = args$plot_height %||% 1200,
+      x_range = sort(x_range), y_range = sort(y_range)
+    ) %>%
+    rasterly_points(color = viridisLite::inferno(256)) %>%
+    rasterly_build()
+  sum_df <- image2data(
+    plt$agg$rasterlyPoints1[[1]] %>% {
+      .[rev(seq_len(nrow(.))), ]
+    },
+    x_range = plt$x_range, y_range = plt$y_range, background = 0
+  ) %>%
+    arrange(color)
+  plt <- sum_df %>%
+    ggplot(aes(x, y, color = color)) +
+    # stat_bin_2d(geom = "raster", bins = c(1200, 1600)) +
+    geom_point(shape = 16, size = 0.3, alpha = 0.8) +
+    lims(x = x_range, y = y_range) +
+    labs(x = args$xlab %||% rlang::as_name(x_sym), y = args$ylab %||% rlang::as_name(y_sym), color = "Count") +
     scale_color_viridis_c(trans = "log10", option = "inferno") +
-    theme_minimal()
+    theme_minimal() +
+    theme(plot.background = element_rect(fill = "white"))
   ggsave(
-    file.path(out_dir, paste0(out, ".pdf")), plt,
-    width = 12, height = 8
+    file.path(out_dir, paste0(out, ".png")), plt,
+    width = 10, height = 6.7
   )
+  plt
 }
+
 
 plot_scatter_rasterly_2 <- function(data, x, y, out, out_dir = dir_res, ...) {
   args <- rlang::list2(...)
@@ -304,52 +464,8 @@ plot_scatter_rasterly_2 <- function(data, x, y, out, out_dir = dir_res, ...) {
   df <- data %>%
     select(!!x_sym, !!y_sym) %>%
     drop_na()
+
   plt <- df %>%
-    rasterly(
-      mapping = aes(x = !!x_sym, y = !!y_sym),
-      plot_width = 1600, plot_height = 1200,
-      ...
-    ) %>%
-    rasterly_points(color = viridisLite::inferno(256)) %>%
-    rasterly_build()
-  # sum_mat <- plt$agg[[1]][[1]]
-  # sum_mat[sum_mat == 0] <- NA_real_
-  # sum_df <- sum_mat %>%
-    
-  # df %>%
-  #   ggplot(aes(!!x_sym, !!y_sym, fill = after_stat(count))) +
-  #   stat_density_2d(geom = "raster")
-  
-  # gr <- rasterlyGrob(
-  #   plt,
-  #   xlab = args$xlab %||% rlang::as_name(x_sym),
-  #   ylab = args$ylab %||% rlang::as_name(y_sym)
-  # )
-  # plt <- ggRasterly(
-  #   df, mapping = aes(x = !!x_sym, y = !!y_sym),
-  #   plot_width = 1600, plot_height = 1200,
-  #   shape = 16,
-  #   # color = viridisLite::inferno(256),
-  #   ...
-  # ) +
-  #   labs(x = args$xlab %||% rlang::as_name(x_sym), y = args$ylab %||% rlang::as_name(y_sym)) +
-  #   scale_color_viridis_c(trans = "log10", option = "inferno") +
-  #   theme_minimal()
-  # ggsave(
-  #   file.path(out_dir, paste0(out, ".pdf")), plt,
-  #   width = 12, height = 8
-  # )
-}
-
-plot_scatter_rasterly_3 <- function(data, x, y, out, out_dir = dir_res, ...) {
-  args <- rlang::list2(...)
-  x_sym <- enquo(x)
-  y_sym <- enquo(y)
-  df <- data %>%
-    select(!!x_sym, !!y_sym) %>%
-    drop_na()
-
-  df %>%
     ggplot(aes(!!x_sym, !!y_sym)) +
     stat_bin_2d(geom = "raster", bins = c(1200, 1600)) +
     lims(x = args$x_range, y = args$y_range) +
@@ -363,57 +479,71 @@ plot_scatter_rasterly_3 <- function(data, x, y, out, out_dir = dir_res, ...) {
   )
 }
 
-plt <- plot_scatter_rasterly_3(
-  growth_data_bliss, gr, excess_killing, "nci_almanac_gr_vs_excess_killing_scatter_2.pdf",
-  x_range = c(1.5, -3), y_range = c(-2, 2),
-  xlab = "GR", ylab = "Delta Bliss"
+# plt <- plot_scatter_rasterly_3(
+#   growth_data_bliss, gr, excess_bliss, "nci_almanac_gr_vs_excess_bliss_scatter_2.pdf",
+#   x_range = c(1.5, -3), y_range = c(-2, 2),
+#   xlab = "GR", ylab = "Excess over Bliss"
+# )
+
+# x <- plot_scatter_rasterly_2(
+#   growth_data_bliss_auc, gr_min, AUC, "nci_almanac_gr_min_vs_auc_scatter",
+#   x_range = c(1.5, -2), y_range = c(-5, 5),
+#   xlab = "GR min", ylab = "Excess over Bliss AUC"
+# )
+# 
+# ggsave("test3.pdf", x, width = 12, height = 8)
+
+plot_scatter_rasterly(
+  growth_data_bliss, gr, excess_bliss, "nci_almanac_gr_vs_excess_bliss_scatter",
+  x_range = c(1.5, -3), y_range = c(-1, 1),
+  xlab = "GR", ylab = "Excess over Bliss"
 )
 
 plot_scatter_rasterly(
-  growth_data_bliss, gr, excess_killing, "nci_almanac_gr_vs_excess_killing_scatter_2.pdf",
-  x_range = c(1.5, -3), y_range = c(-2, 2),
-  xlab = "GR", ylab = "Delta Bliss"
+  growth_data_bliss_agg, gr_gr_min, excess_bliss_auc, "nci_almanac_gr_min_vs_auc_scatter",
+  x_range = c(1.5, -2), y_range = c(-5, 5),
+  xlab = "GR min", ylab = "Excess over Bliss AUC"
 )
 
 plot_scatter_rasterly(
-  growth_data_bliss_auc, gr_min, AUC, "nci_almanac_gr_min_vs_auc_scatter.pdf",
-  x_range = c(-2, 1.5), y_range = c(-5, 5),
-  xlab = "GR min", ylab = "Delta Bliss AUC"
+  growth_data_bliss_agg, gr_mean, excess_bliss_auc, "nci_almanac_gr_mean_vs_auc_scatter",
+  x_range = c(1.5, -0.5), y_range = c(-5, 5),
+  xlab = "GR mean", ylab = "Excess over Bliss AUC"
 )
 
 plot_scatter_rasterly(
-  growth_data_bliss_auc, gr_mean, AUC, "nci_almanac_gr_mean_vs_auc_scatter.pdf",
-  x_range = c(-0.5, 1.5), y_range = c(-5, 5),
-  xlab = "GR mean", ylab = "Delta Bliss AUC"
-)
-
-plot_scatter_rasterly(
-  growth_data_bliss_auc, gr_min, AUC, "nci_almanac_gr_min_vs_auc_scatter.pdf",
-  x_range = c(-2, 1.5), y_range = c(-5, 5),
-  xlab = "GR min", ylab = "Delta Bliss AUC"
-)
-
- plot_scatter_rasterly(
-  growth_data_bliss_auc, gr_min, excess_killing_gr_min, "nci_almanac_gr_min_vs_excess_killing_gr_min.pdf",
-  x_range = c(-2, 1.5), y_range = c(-1, 1),
-  xlab = "GR min", ylab = "Delta Bliss at GR min"
+  growth_data_bliss_agg, gr_gr_min, excess_bliss_gr_min, "nci_almanac_gr_min_vs_excess_bliss_gr_min",
+  x_range = c(1.5, -2), y_range = c(-1, 1),
+  xlab = "GR min", ylab = "Excess over Bliss at GR min"
 )
 
 
 plot_scatter_rasterly(
-  growth_data_bliss_auc, log_killing_max, excess_killing_log_killing_max, "nci_almanac_log_killing_max_vs_exces_killing_log_killing_max.pdf",
+  growth_data_bliss_agg, log_kills_log_kills_max, excess_bliss_log_kills_max, "nci_almanac_log_kills_max_vs_excess_bliss_log_kills_max",
   x_range = c(-0.2, 2), y_range = c(-1, 1),
-  xlab = "Max log killing", ylab = "Delta Bliss at max log killing"
+  xlab = "Max log kills", ylab = "Excess over Bliss at max log kills"
 )
-
 
 ## By cell line
 dir_res_by_cell <- file.path(dir_res, "by_cell_line")
 dir.create(dir_res_by_cell, showWarnings = FALSE)
 
-growth_data_bliss %>%
+x <- growth_data_bliss_auc %>%
+  filter(
+    panel_id == 9, cell_id == 18,
+    log_kills_max > 1.5, excess_bliss_log_kills_max > 0
+  )
+
+y <- growth_data_bliss %>%
+  filter(
+    panel_id == 9, cell_id == 18,
+    log_kills > 1.5, excess_bliss > 0,
+    lspci_id_1 == 55206
+  )
+
+scatter_plots_per_cell_line <- growth_data_bliss %>%
   distinct(panel_id, cell_id) %>%
-  pwalk(
+  pmap(
     function(panel_id, cell_id) {
       cell_info <- meta_cell_line %>%
         mutate(across(c(cell_name, panel_name), str_replace_all, r"([^\w])", "_")) %>%
@@ -421,53 +551,259 @@ growth_data_bliss %>%
           paste(.$panel_name, .$cell_name, sep = "_")
         }
       
-      plot_scatter_rasterly(
+      print(cell_info)
+      
+      plots <- list()
+      
+      plots[["gr_vs_excess_bliss"]] <- plot_scatter_rasterly(
         filter(growth_data_bliss, cell_id == !!cell_id, panel_id == !!panel_id),
-        gr, excess_killing, paste0("nci_almanac_", cell_info, "_gr_vs_excess_killing_scatter.pdf"),
-        x_range = c(1.5, -3), y_range = c(-2, 2),
-        xlab = "GR", ylab = "Delta Bliss",
-        out_dir = dir_res_by_cell
+        gr, excess_bliss, paste0("nci_almanac_", cell_info, "_gr_vs_excess_bliss_scatter"),
+        x_range = c(1.5, -3), y_range = c(-1, 1),
+        xlab = "GR", ylab = "Excess over Bliss",
+        out_dir = dir_res_by_cell, plot_width = 800, plot_height = 600
       )
       
       df_auc <- filter(growth_data_bliss_auc, cell_id == !!cell_id, panel_id == !!panel_id)
-      plot_scatter_rasterly(
-        df_auc, gr_min, AUC, paste0("nci_almanac_", cell_info, "_gr_min_vs_auc_scatter.pdf"),
-        x_range = c(-2, 1.5), y_range = c(-5, 5),
-        xlab = "GR min", ylab = "Delta Bliss AUC",
-        out_dir = dir_res_by_cell
+      plots[["gr_min_vs_auc"]] <- plot_scatter_rasterly(
+        df_auc, gr_min, AUC, paste0("nci_almanac_", cell_info, "_gr_min_vs_auc_scatter"),
+        x_range = c(1.5, -3), y_range = c(-5, 5),
+        xlab = "GR min", ylab = "Excess over Bliss AUC",
+        out_dir = dir_res_by_cell, plot_width = 800, plot_height = 600
       )
       
-      plot_scatter_rasterly(
-        df_auc, gr_mean, AUC, paste0("nci_almanac_", cell_info, "_gr_mean_vs_auc_scatter.pdf"),
-        x_range = c(-0.5, 1.5), y_range = c(-5, 5),
-        xlab = "GR mean", ylab = "Delta Bliss AUC",
-        out_dir = dir_res_by_cell
+      plots[["gr_mid_vs_excess_bliss_gr_mid"]] <- plot_scatter_rasterly(
+        df_auc, gr_mid, excess_bliss_gr_mid, paste0("nci_almanac_", cell_info, "_gr_mid_vs_excess_bliss_gr_mid_scatter"),
+        x_range = c(1.5, -3), y_range = c(-1, 1),
+        xlab = "GR mid concentration", ylab = "Excess over Bliss mid concentration",
+        out_dir = dir_res_by_cell, plot_width = 800, plot_height = 600
       )
       
-      plot_scatter_rasterly(
-        df_auc, gr_min, AUC, paste0("nci_almanac_", cell_info, "_gr_min_vs_auc_scatter.pdf"),
-        x_range = c(-2, 1.5), y_range = c(-5, 5),
-        xlab = "GR min", ylab = "Delta Bliss AUC",
-        out_dir = dir_res_by_cell
+      plots[["gr_mean_vs_auc"]] <- plot_scatter_rasterly(
+        df_auc, gr_mean, AUC, paste0("nci_almanac_", cell_info, "_gr_mean_vs_auc_scatter"),
+        x_range = c(1.5, -3), y_range = c(-5, 5),
+        xlab = "GR mean", ylab = "Excess over Bliss AUC",
+        out_dir = dir_res_by_cell, plot_width = 800, plot_height = 600
       )
       
-       plot_scatter_rasterly(
-        df_auc, gr_min, excess_killing_gr_min, paste0("nci_almanac_", cell_info, "_gr_min_vs_excess_killing_gr_min.pdf"),
-        x_range = c(-2, 1.5), y_range = c(-1, 1),
-        xlab = "GR min", ylab = "Delta Bliss at GR min",
-        out_dir = dir_res_by_cell
+      plots[["gr_min_vs_auc"]] <- plot_scatter_rasterly(
+        df_auc, gr_min, AUC, paste0("nci_almanac_", cell_info, "_gr_min_vs_auc_scatter"),
+        x_range = c(1.5, -3), y_range = c(-5, 5),
+        xlab = "GR min", ylab = "Excess over Bliss AUC",
+        out_dir = dir_res_by_cell, plot_width = 800, plot_height = 600
       )
       
-      plot_scatter_rasterly(
-        df_auc, log_killing_max, excess_killing_log_killing_max, paste0("nci_almanac_", cell_info, "_log_killing_max_vs_exces_killing_log_killing_max.pdf"),
-        x_range = c(-0.2, 2), y_range = c(-1, 1),
-        xlab = "Max log killing", ylab = "Delta Bliss at max log killing",
-        out_dir = dir_res_by_cell
+       plots[["gr_min_vs_excess_bliss_gr_min"]] <- plot_scatter_rasterly(
+        df_auc, gr_min, excess_bliss_gr_min, paste0("nci_almanac_", cell_info, "_gr_min_vs_excess_bliss_gr_min"),
+        x_range = c(1.5, -3), y_range = c(-1, 1),
+        xlab = "GR min", ylab = "Excess over Bliss at GR min",
+        out_dir = dir_res_by_cell, plot_width = 800, plot_height = 600
       )
+      
+      plots[["log_kills_max_vs_excess_bliss_log_kills_max"]] <- plot_scatter_rasterly(
+        df_auc, log_kills_max, excess_bliss_log_kills_max, paste0("nci_almanac_", cell_info, "_log_kills_max_vs_excess_bliss_log_kills_max"),
+        x_range = c(-0.2, 3), y_range = c(-1, 1),
+        xlab = "Max log kills", ylab = "Excess over Bliss at max log kills",
+        out_dir = dir_res_by_cell, plot_width = 800, plot_height = 600
+      )
+      
+      plots
     }
   )
 
+
 ```
+
+```{r response_rate}
+growth_data_bliss_cell_agg <- tibble(response_threshold = c(0.5, 0.95)) %>%
+  mutate(
+    data = map(
+      response_threshold,
+      function(response_threshold) {
+        growth_data_bliss_agg %>%
+          group_by(
+            across(c(panel_id, starts_with("lspci_id")))
+          ) %>%
+          summarize(
+            across(
+              c(starts_with("excess_bliss"), starts_with("fraction_killing")),
+              ~sum(.x > response_threshold) / length(.x)
+            ), .groups = "drop"
+          )
+      }
+    )
+  ) %>%
+  unnest(data)
+
+plt <- growth_data_bliss_cell_agg %>%
+  ggplot(
+    aes(fraction_killing_gr_min, excess_bliss_gr_min)
+  ) +
+    geom_point() +
+    facet_wrap(~response_threshold) +
+    labs(x = "Response rate at GR min", y = "Excess over independence at GR min") +
+    # lims(x = c(0, 1), y = c(-1, 1)) +
+    theme_minimal()
+
+plot_scatter_rasterly(
+  filter(growth_data_bliss_cell_agg, panel_id == 1, response_threshold == 0.95), fraction_killing_gr_min, excess_bliss_gr_min, "nci_almanac_cell_agg_response_rate_gr_min_vs_excess_independence_gr_min",
+  x_range = c(0, 1), y_range = c(-1, 1),
+  xlab = "Response rate at GR min", ylab = "Excess over independence at GR min"
+)
+
+```
+
+
+```{r proportion_synergistic}
+plt <- growth_data_bliss %>%
+  mutate(
+    gr_bin = cut(gr, c(-Inf, seq(-3, 1.5, by = 0.5), Inf), ordered_result = TRUE) %>%
+      fct_rev()
+  ) %>%
+  group_by(gr_bin) %>%
+  summarize(
+    proportion_synergistic_combos_in_bin = sum(excess_bliss > log10(2)) / n(),
+    proportion_synergistic_combos = sum(excess_bliss > log10(2)) / sum(.$excess_bliss > log10(2)),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(gr_bin, proportion_synergistic_combos)) +
+    geom_col()
+
+plt <- growth_data_bliss %>%
+  mutate(
+    gr_bin = cut(gr, c(-Inf, seq(-3, 1.5, by = 0.5), Inf), ordered_result = TRUE) %>%
+      fct_rev()
+  ) %>%
+  group_by(gr_bin) %>%
+  summarize(
+    proportion_synergistic_combos_per_bin = sum(excess_bliss > log10(2)) / n(),
+    proportion_synergistic_combos = sum(excess_bliss > log10(2)) / sum(.$excess_bliss > log10(2)),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(gr_bin, proportion_synergistic_combos_per_bin)) +
+    geom_col()
+
+plt <- growth_data_bliss %>%
+  mutate(
+    log_kills_bin = cut(log_kills, c(-Inf, seq(0.5, 9.5, by = 0.5), Inf), ordered_result = TRUE)
+  ) %>%
+  group_by(log_kills_bin) %>%
+  summarize(
+    proportion_synergistic_combos_per_bin = sum(excess_bliss > log10(2)) / n(),
+    proportion_synergistic_combos = sum(excess_bliss > log10(2)) / sum(.$excess_bliss > log10(2)),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(log_kills_bin, proportion_synergistic_combos_per_bin)) +
+    geom_col()
+
+plt <- growth_data_bliss_auc %>%
+  mutate(
+    gr_mean_bin = cut(gr_mean, c(-Inf, seq(-3, 1.5, by = 0.5), Inf), ordered_result = TRUE) %>%
+      fct_rev()
+  ) %>%
+  group_by(panel_id, cell_id, gr_mean_bin) %>%
+  summarize(
+    proportion_synergistic_combos_in_bin = sum(excess_bliss_mean > log10(2)) / n(),
+    proportion_synergistic_combos = sum(excess_bliss_mean > log10(2)) / sum(.$excess_bliss_mean > log10(2)),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    meta_cell_line
+  ) %>%
+  ggplot(aes(gr_mean_bin, proportion_synergistic_combos_in_bin)) +
+    geom_crossbar(stat = "summary", color = "gray40") +
+    ggbeeswarm::geom_quasirandom(width = 0.2) +
+    facet_wrap(vars(panel_name)) +
+    theme_minimal()
+
+plt <- growth_data_bliss_auc %>%
+  mutate(
+    gr_mean_bin = cut(gr_mean, c(-Inf, seq(-3, 1.5, by = 0.5), Inf), ordered_result = TRUE) %>%
+      fct_rev()
+  ) %>%
+  group_by(panel_id, cell_id, gr_mean_bin) %>%
+  summarize(
+    proportion_synergistic_combos_in_bin = sum(excess_bliss_mean > log10(2)) / n(),
+    proportion_synergistic_combos = sum(excess_bliss_mean > log10(2)) / sum(.$excess_bliss_mean > log10(2)),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    meta_cell_line
+  ) %>%
+  ggplot(aes(gr_mean_bin, proportion_synergistic_combos_in_bin)) +
+    geom_crossbar(stat = "summary", color = "gray40") +
+    ggbeeswarm::geom_quasirandom(width = 0.2) +
+    facet_wrap(vars(panel_name)) +
+    theme_minimal()
+
+plt <- growth_data_bliss %>%
+  mutate(
+    gr_bin = cut(gr, c(-Inf, seq(-3, 1.5, by = 0.5), Inf), ordered_result = TRUE) %>%
+      fct_rev()
+  ) %>%
+  group_by(panel_id, cell_id, gr_bin) %>%
+  summarize(
+    proportion_synergistic_combos_in_bin = sum(excess_bliss > log10(2)) / n(),
+    proportion_synergistic_combos = sum(excess_bliss > log10(2)) / sum(.$excess_bliss > log10(2)),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    meta_cell_line
+  ) %>%
+  ggplot(aes(gr_bin, proportion_synergistic_combos_in_bin)) +
+    # geom_crossbar(stat = "summary", color = "gray40") +
+    # ggbeeswarm::geom_quasirandom(width = 0.2) +
+    geom_line(aes(group = cell_id)) +
+    facet_wrap(vars(panel_name)) +
+    theme_minimal()
+
+plt <- growth_data_bliss %>%
+  mutate(
+    gr_bin = cut(gr, c(-Inf, seq(-3, 1.5, by = 0.5), Inf), ordered_result = TRUE) %>%
+      fct_rev()
+  ) %>%
+  group_by(panel_id, cell_id, gr_bin) %>%
+  filter(n() > 10) %>%
+  summarize(
+    proportion_synergistic_combos_in_bin = sum(excess_bliss > log10(2)) / n(),
+    proportion_synergistic_combos = sum(excess_bliss > log10(2)) / sum(.$excess_bliss > log10(2)),
+    excess_bliss_mean = mean(excess_bliss),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    meta_cell_line
+  ) %>%
+  ggplot(aes(gr_bin, excess_bliss_mean)) +
+    geom_crossbar(stat = "summary", color = "gray40") +
+    # ggbeeswarm::geom_quasirandom(width = 0.2) +
+    geom_line(aes(group = cell_id)) +
+    facet_wrap(vars(panel_name)) +
+    theme_minimal()
+
+plt <- growth_data_bliss %>%
+  mutate(
+    gr_bin = cut(gr, c(-Inf, seq(-3, 1.5, by = 0.5), Inf), ordered_result = TRUE) %>%
+      fct_rev()
+  ) %>%
+  group_by(panel_id, cell_id, gr_bin) %>%
+  filter(n() > 10) %>%
+  summarize(
+    proportion_synergistic_combos_in_bin = sum(excess_bliss > log10(2)) / n(),
+    proportion_synergistic_combos = sum(excess_bliss > log10(2)) / sum(.$excess_bliss > log10(2)),
+    excess_bliss_mean = mean(excess_bliss),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    meta_cell_line
+  ) %>%
+  ggplot(aes(gr_bin, excess_bliss_mean)) +
+    geom_crossbar(stat = "summary", color = "gray40") +
+    # ggbeeswarm::geom_quasirandom(width = 0.2) +
+    geom_line(aes(group = cell_id)) +
+    facet_wrap(vars(panel_name)) +
+    theme_minimal()
+
+```
+
 
 
 ```{r umap}
@@ -510,11 +846,11 @@ umap_gr_min <- umap(
 )
 ```
 
-* Net killing vs delta bliss, using all concentrations
+* Net killing vs Excess over Bliss, using all concentrations
 * Or using AUC, adding up all values
 * Stratify by cell line
 * Use GR value for x-axis
-* Range of delta bliss across cell line
+* Range of Excess over Bliss across cell line
 * Plot minimum GR vs excess killing at the same doses
 
 * UMAP of AUC values per cell line
