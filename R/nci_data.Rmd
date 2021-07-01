@@ -6,13 +6,13 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-
 library(tidyverse)
 library(data.table)
 library(vroom)
 library(fst)
 library(here)
+
+data.table::setDTthreads(4)
 
 dir_data <- here("data")
 dir.create(dir_data, showWarnings = FALSE)
@@ -20,7 +20,7 @@ dir_res <- here("nci")
 dir.create(dir_res, showWarnings = FALSE)
 
 synapser::synLogin()
-syn <- synExtra::synDownloader(dir_data)
+syn <- synExtra::synDownloader(dir_data, ifcollision = "overwrite.local")
 ```
 
 ## Download
@@ -42,15 +42,21 @@ if (!file.exists(nci_almanac_path))
     nci_almanac_path
   )
 
-nci_almanac_drug_meta_path <- file.path(dir_data, "nci_almanac_drug_meta.csv")
+nci_almanac_drug_meta_path <- file.path(dir_data, "nci_almanac_drug_meta_raw.csv")
 if (!file.exists(nci_almanac_drug_meta_path))
   download.file(
     "https://wiki.nci.nih.gov/download/attachments/338237347/ComboCompoundNames_small.txt?version=1&modificationDate=1493822467000&api=v2",
     nci_almanac_drug_meta_path
   )
+```
 
-unzip(nci_60_doseresp_path)
-unzip(nci_almanac_path)
+
+```{r extract_data}
+system2("unzip", c(shQuote(nci_60_doseresp_path), "-d", shQuote(dir_data)))
+system2("gzip", shQuote(file.path(dir_data, "DOSERESP.csv")))
+
+system2("unzip", c(shQuote(nci_almanac_path), "-d", shQuote(dir_data)))
+system2("gzip", shQuote(file.path(dir_data, "ComboDrugGrowth_Nov2017.csv")))
 ```
 
 ```{r read}
@@ -64,10 +70,10 @@ lspci_clinical_info <- syn("syn25173555") %>%
 lspci_compound_dictionary <- syn("syn25173500") %>%
   read_fst(as.data.table = TRUE)
 
-nci_60_doseresp_raw <- file.path(dir_data, "DOSERESP.csv") %>%
+nci_60_doseresp_raw <- file.path(dir_data, "DOSERESP.csv.gz") %>%
   vroom()
 
-nci_almanac_raw <- file.path(dir_data, "ComboDrugGrowth_Nov2017.csv") %>%
+nci_almanac_raw <- file.path(dir_data, "ComboDrugGrowth_Nov2017.csv.gz") %>%
   vroom()
 
 nci_almanac_drug_meta_raw <- read_tsv(nci_almanac_drug_meta_path, col_names = c("id", "name"))
@@ -138,7 +144,19 @@ write_csv(
   file.path(dir_res, "nci_almanac_cell_line_meta.csv")
 )
 
-nci_almanac <- nci_almanac_raw %>%
+# Some drug combos exist in both directions a - b and b - a
+# Arranging them so they consistent
+swapped_idx <- with(nci_almanac_raw, NSC1 > NSC2) %>%
+  replace_na(FALSE)
+nci_almanac_raw_swapped <- nci_almanac_raw
+nci_almanac_raw_swapped[
+  swapped_idx, c("PREFIX1", "NSC1", "SAMPLE1", "CONCINDEX1", "CONC1", "CONCUNIT1")
+] <- nci_almanac_raw[swapped_idx, c("PREFIX2", "NSC2", "SAMPLE2", "CONCINDEX2", "CONC2", "CONCUNIT2")]
+nci_almanac_raw_swapped[
+  swapped_idx, c("PREFIX2", "NSC2", "SAMPLE2", "CONCINDEX2", "CONC2", "CONCUNIT2")
+] <- nci_almanac_raw[swapped_idx, c("PREFIX1", "NSC1", "SAMPLE1", "CONCINDEX1", "CONC1", "CONCUNIT1")]
+
+nci_almanac <- nci_almanac_raw_swapped %>%
   select(
     study_location = SCREENER,
     study_id = STUDY,
