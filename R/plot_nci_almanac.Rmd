@@ -105,6 +105,13 @@ plt <- growth_data_raw %>%
     geom_col(position = "dodge")
 ggsave(file.path(dir_res, "nci_almanac_study_location_counts.pdf"), plt, width = 5, height = 3)
 
+growth_data_raw %>%
+  drop_na(lspci_id_2) %>%
+  group_by(
+    panel_id, cell_id, lspci_id_1, lspci_id_2, drug_concentration_1, drug_concentration_2
+  ) %>%
+  arrange(.by_group = TRUE) %>%
+  filter(n() > 1)
 
 growth_data_raw %>%
   group_by(
@@ -333,11 +340,14 @@ growth_data_bliss <- growth_data_bliss_raw %>%
   growth_data_bliss %>%
     group_by(panel_id, cell_id, lspci_id_1, lspci_id_2) %>%
     mutate(
+      # Mark concentration combos that equal the requested summary stat
       is_selected = sum_fn(!!col, na.rm = TRUE) == !!col,
       excess_bliss_auc = sum(excess_bliss),
       gr_mean = mean(gr)
     ) %>%
     arrange(
+      # Chose concentration combination that was selected. In case
+      # of ties use highest concentration
       desc(is_selected),
       desc(drug_concentration_1 + drug_concentration_2),
       .by_group = TRUE
@@ -346,6 +356,9 @@ growth_data_bliss <- growth_data_bliss_raw %>%
     ungroup()
 }
 
+# Define two ways we want to aggregate across concentrations:
+# 1. Using the concentration combination with the lowest GR
+# 2. Combo with highest log kills
 growth_data_bliss_agg_nested <- tribble(
   ~sum_fn, ~col, ~name,
   min, quo(gr), "gr_min",
@@ -370,50 +383,6 @@ growth_data_bliss_agg <- growth_data_bliss_agg_nested %>%
   pivot_wider(
     names_from = name, values_from = value
   )
-  # select(
-  #   agg_name, panel_id, cell_id, starts_with("lspci_id"),
-    # starts_with("gr"), starts_with("excess_bliss"),
-    # starts_with("log_kills"), starts_with("fraction_killing")
-  # ) %>%
-  # pivot_wider(
-  #   names_from = 
-  # )
-  # transmute(
-  #   data = map2(
-  #     data, agg_name, ~rename_with(
-  #       .x,
-  #       .cols = c(starts_with("gr"), starts_with("excess_bliss"),
-  #         starts_with("log_kills"), starts_with("fraction_killing")),
-  #       .fn = paste, .y, sep = "_"
-  #     ) %>%
-  #   )
-  # )
-  # unnest(data)
-
-# growth_data_bliss %>%
-#   group_by(panel_id, cell_id, lspci_id_1, lspci_id_2) %>%
-#   summarize(
-#     # AUC = sum(excess_bliss),
-#     # across(
-#       # c(starts_with("gr"), starts_with("excess_bliss"),
-#       #   starts_with("log_kills"), starts_with("fraction_killing"),
-#     #     function(x) {
-#     #       
-#     #     }
-#     # )
-#     gr_min = min(gr, na.rm = TRUE),
-#     gr_mean = mean(gr, na.rm = TRUE),
-#     gr_mid = gr[drug_concentration_index_1 == 2 & drug_concentration_index_2 == 2],
-#     excess_bliss_gr_mid = excess_bliss[drug_concentration_index_1 == 2 & drug_concentration_index_2 == 2],
-#     excess_bliss_gr_min = mean(excess_bliss[gr == gr_min]),
-#     excess_bliss_mean = mean(excess_bliss),
-#     log_kills_max = max(log_kills, na.rm = TRUE),
-#     excess_bliss_log_kills_max =  mean(excess_bliss[log_kills == log_kills_max]),
-#     fraction_killing_gr_min = fraction_killing[gr == gr_min],
-#     fraction_killing_1_gr_min = fraction_killing_1[gr == gr_min],
-#     fraction_killing_2_gr_min = fraction_killing_1[gr == gr_min],
-#     .groups = "drop"
-#   )
 
 library(rasterly)
 plot_scatter_rasterly <- function(
@@ -455,43 +424,6 @@ plot_scatter_rasterly <- function(
   )
   plt
 }
-
-
-plot_scatter_rasterly_2 <- function(data, x, y, out, out_dir = dir_res, ...) {
-  args <- rlang::list2(...)
-  x_sym <- enquo(x)
-  y_sym <- enquo(y)
-  df <- data %>%
-    select(!!x_sym, !!y_sym) %>%
-    drop_na()
-
-  plt <- df %>%
-    ggplot(aes(!!x_sym, !!y_sym)) +
-    stat_bin_2d(geom = "raster", bins = c(1200, 1600)) +
-    lims(x = args$x_range, y = args$y_range) +
-    labs(x = args$xlab %||% rlang::as_name(x_sym), y = args$ylab %||% rlang::as_name(y_sym)) +
-    scale_fill_viridis_c(trans = "log10", option = "inferno") +
-    theme_minimal()
-
-  ggsave(
-    file.path(out_dir, paste0(out, ".pdf")), plt,
-    width = 12, height = 8
-  )
-}
-
-# plt <- plot_scatter_rasterly_3(
-#   growth_data_bliss, gr, excess_bliss, "nci_almanac_gr_vs_excess_bliss_scatter_2.pdf",
-#   x_range = c(1.5, -3), y_range = c(-2, 2),
-#   xlab = "GR", ylab = "Excess over Bliss"
-# )
-
-# x <- plot_scatter_rasterly_2(
-#   growth_data_bliss_auc, gr_min, AUC, "nci_almanac_gr_min_vs_auc_scatter",
-#   x_range = c(1.5, -2), y_range = c(-5, 5),
-#   xlab = "GR min", ylab = "Excess over Bliss AUC"
-# )
-# 
-# ggsave("test3.pdf", x, width = 12, height = 8)
 
 plot_scatter_rasterly(
   growth_data_bliss, gr, excess_bliss, "nci_almanac_gr_vs_excess_bliss_scatter",
