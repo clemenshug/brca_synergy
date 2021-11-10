@@ -60,14 +60,14 @@ system2("gzip", shQuote(file.path(dir_data, "ComboDrugGrowth_Nov2017.csv")))
 ```
 
 ```{r read}
-lspci_drug_names <- syn("syn25173503") %>%
+lspci_drug_names <- syn("syn26260347") %>%
   read_fst(as.data.table = TRUE) %>%
   mutate(across(name, str_to_lower))
 
-lspci_clinical_info <- syn("syn25173555") %>%
+lspci_clinical_info <- syn("syn26260451") %>%
   read_fst(as.data.table = TRUE)
 
-lspci_compound_dictionary <- syn("syn25173500") %>%
+lspci_compound_dictionary <- syn("syn26260332") %>%
   read_fst(as.data.table = TRUE)
 
 nci_60_doseresp_raw <- file.path(dir_data, "DOSERESP.csv.gz") %>%
@@ -191,7 +191,13 @@ fwrite(
   file.path(dir_res, "nci_almanac_growth_data.csv.gz")
 )
 ```
+https://zenodo.org/record/4129688
+https://osf.io/sym6h/
 
+```{r filter}
+
+
+```
 
 ```{r store_synapse}
 activity <- synapser::Activity(
