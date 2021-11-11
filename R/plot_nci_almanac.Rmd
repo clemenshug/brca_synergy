@@ -27,11 +27,11 @@ syn <- synExtra::synDownloader(dir_data, ifcollision = "overwrite.local")
 
 ```{r load}
 growth_data_raw <- syn("syn25882596") %>%
-  read_csv()
+  fread()
 meta_cell_line <- syn("syn25882595") %>%
-  read_csv()
+  fread()
 meta_drugs <- syn("syn25882594") %>%
-  read_csv() %>%
+  fread() %>%
   # There are duplicates where multiple drug ids in the dataset map to the same lspci_id
   # Getting rid of duplicates for this analysis here
   distinct(lspci_id, max_phase, pref_name)
@@ -148,7 +148,8 @@ compute_bliss <- function(data) {
     # Cap the fraction killing between 0 and 1 for bliss model
     fraction_killing_bliss_expected = fraction_killing_1 + fraction_killing_2 - fraction_killing_1 * fraction_killing_2,
     excess_bliss = log10(1 - fraction_killing_bliss_expected) - log10(1 - fraction_killing),
-    log_kills_bliss_expected = log10(1 / (1 - fraction_killing_bliss_expected))
+    log_kills_bliss_expected = log10(1 / (1 - fraction_killing_bliss_expected)),
+    gr_bliss_expected = 
   )
 }
 
@@ -165,20 +166,43 @@ growth_data_all <- growth_data_raw %>%
   #   CONTROLVALUE > 1e3,
   #   TZVALUE > 1e3
   # ) %>%
-  filter(TESTVALUE > 0) %>%
+  filter(TESTVALUE > 0, !study_location %chin% c("1A")) %>%
   compute_metrics()
 
-growth_data <- growth_data_all %>%
-  as.data.table() %>% {
-    .[
-      ,
-      lapply(.SD, mean),
-      by = c("panel_id", "cell_id", "lspci_id_1", "lspci_id_2", "drug_concentration_1", "drug_concentration_2"),
-      .SDcols = c("fraction_killing", "log_kills", "gr", "gr_bound")
-    ]
-  }
+growth_data_filtered <- growth_data_all %>%
+  group_by(panel_id, cell_id, lspci_id_1, lspci_id_2, drug_concentration_1, drug_concentration_2) %>%
+  filter(
+    study_location %chin% names(which.max(table(study_location)))
+  )
 
-growth_data_single_dose_all <- growth_data_all %>%
+growth_data <- growth_data_filtered %>%
+  summarize(
+    across(
+      where(is.numeric), mean
+    ), .groups = "drop"
+  )
+  # setDT() %>% {
+  #   .[
+  #     study_location == names(which.max(table(study_location))),
+  #     keyby = c("panel_id", "cell_id", "lspci_id_1", "lspci_id_2", "drug_concentration_1", "drug_concentration_2")
+  #   ][
+  #     ,
+  #     lapply(.SD, mean),
+  #     .SDcols = c("fraction_killing", "log_kills", "gr", "gr_bound"),
+  #     keyby = c("panel_id", "cell_id", "lspci_id_1", "lspci_id_2", "drug_concentration_1", "drug_concentration_2")
+  #   ]
+  # }
+  # as.data.table() %>% {
+  #   .[
+  #     ,
+  #     lapply(.SD, mean),
+  #     by = c("panel_id", "cell_id", "lspci_id_1", "lspci_id_2", "drug_concentration_1", "drug_concentration_2"),
+  #     .SDcols = c("fraction_killing", "log_kills", "gr", "gr_bound")
+  #   ]
+  # }
+
+growth_data_single_dose_filtered <- growth_data_filtered %>%
+  ungroup() %>%
   filter(is.na(lspci_id_2)) %>%
   rename(
     lspci_id = lspci_id_1,
@@ -257,7 +281,7 @@ plot_gr <- function(panel_id, cell_id, lspci_ids, y = gr, highlight_conc = FALSE
   data_agg <- growth_data_single_dose_agg %>%
     filter(panel_id == !!panel_id, cell_id == !!cell_id, lspci_id %in% lspci_ids) %>%
     left_join(meta_drugs)
-  data_all <- growth_data_single_dose_all %>%
+  data_all <- growth_data_single_dose_filtered %>%
     filter(panel_id == !!panel_id, cell_id == !!cell_id, lspci_id %in% lspci_ids) %>%
     left_join(meta_drugs)
   plt <- ggplot(data_agg, aes(drug_concentration, !!y_sym)) +
@@ -339,7 +363,7 @@ plot_combo <- function(...) {
 x <- growth_data_bliss_nested %>% filter(lspci_id_1 == 631796, lspci_id_2 == 487093, cell_id == 16, panel_id == 9)
 plt <- lift_dl(plot_combo)(x)
 
-plt <- pmap(growth_data_bliss_nested[3000, ], plot_combo)[[1]]
+plt <- pmap(growth_data_bliss_nested[1, ], plot_combo)[[1]]
 
 growth_data_bliss%>%
   filter(panel_id == 6) %>%
@@ -352,19 +376,19 @@ plt <- lift_dl(plot_combo)(x)
 ```
 
 ```{r example_combos}
-plt <- pmap(growth_data_bliss_nested[3000, ], plot_combo)[[1]]
+plt <- pmap(filter(growth_data_bliss_nested, pref_name_1 == "GEFITINIB", pref_name_2 == "CRIZOTINIB", cell_name == "NCI-H23"), plot_combo)[[1]]
 ggsave(
   file.path(dir_res, "nci_almanac_example_combo_gefi_crizo.pdf"),
   plt, width = 8, height = 9
 )
 
-plt <- pmap(growth_data_bliss_nested[162290, ], plot_combo)[[1]]
+plt <- pmap(filter(growth_data_bliss_nested, pref_name_1 == "DOXORUBICIN", pref_name_2 == "DOCETAXEL", cell_name == "MOLT-4"), plot_combo)[[1]]
 ggsave(
   file.path(dir_res, "nci_almanac_example_combo_doxo_doce_problematic.pdf"),
   plt, width = 8, height = 9
 )
 
-plt <- pmap(growth_data_bliss_nested[161295, ], plot_combo)[[1]]
+plt <- pmap(filter(growth_data_bliss_nested, pref_name_1 == "CLOFARABINE", pref_name_2 == "DOCETAXEL", cell_name == "MOLT-4"), plot_combo)[[1]]
 ggsave(
   file.path(dir_res, "nci_almanac_example_combo_clofa_doce.pdf"),
   plt, width = 8, height = 9
@@ -739,7 +763,7 @@ plot_scatter_rasterly(
 ```{r proportion_synergistic}
 synergy_threshold <- 1
 
-plt <- growth_data_bliss_agg %>%
+proportion_synergistic <- growth_data_bliss_agg %>%
   mutate(
     gr_bin = cut(gr_gr_min, c(-Inf, seq(min(gr_gr_min), max(gr_gr_min), length.out = 20), Inf), ordered_result = TRUE) %>%
       fct_rev()
@@ -749,9 +773,19 @@ plt <- growth_data_bliss_agg %>%
     proportion_synergistic_combos_in_bin = sum(excess_bliss_gr_min > synergy_threshold) / n(),
     proportion_synergistic_combos = sum(excess_bliss_gr_min > synergy_threshold) / sum(.$excess_bliss_gr_min > synergy_threshold),
     .groups = "drop"
-  ) %>%
-  ggplot(aes(gr_bin, proportion_synergistic_combos_in_bin)) +
-    geom_col()
+  )
+
+plt <- proportion_synergistic %>%
+  pivot_longer(starts_with("proportion"), names_to = "metric", values_to = "proportion") %>%
+  ggplot(aes(gr_bin, proportion)) +
+    geom_col() +
+    facet_wrap(~metric, scales = "free_y", ncol = 1) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+ggsave(
+  file.path(dir_res, "nci_almanac_proportion_synergistic_at_gr_min.pdf"),
+  plt, width = 4, height = 5
+)
 
 x <- growth_data_bliss_agg %>%
   filter(gr_gr_min < -7, gr_gr_min > -8, excess_bliss_gr_min > 1) %>%
@@ -844,6 +878,7 @@ plt <- growth_data_bliss %>%
       fct_rev()
   ) %>%
   group_by(panel_id, cell_id, gr_bin) %>%
+  filter(n() > 10) %>%
   summarize(
     proportion_synergistic_combos_in_bin = sum(excess_bliss > log10(2)) / n(),
     proportion_synergistic_combos = sum(excess_bliss > log10(2)) / sum(.$excess_bliss > log10(2)),
