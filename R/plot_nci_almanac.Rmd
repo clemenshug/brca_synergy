@@ -14,6 +14,8 @@ library(here)
 library(ggbeeswarm)
 library(patchwork)
 
+theme_set(theme_minimal())
+
 dir_data <- here("data")
 dir.create(dir_data, showWarnings = FALSE)
 dir_res <- here("nci")
@@ -173,6 +175,12 @@ growth_data_filtered <- growth_data_all %>%
   group_by(panel_id, cell_id, lspci_id_1, lspci_id_2, drug_concentration_1, drug_concentration_2) %>%
   filter(
     study_location %chin% names(which.max(table(study_location)))
+  ) %>%
+  filter(
+    n() > 1
+  ) %>%
+  filter(
+    t.test(gr, mu = 1, alternative = "less")$p.value < 0.05
   )
 
 growth_data <- growth_data_filtered %>%
@@ -501,7 +509,7 @@ plot_scatter_rasterly <- function(
 
 plot_scatter_rasterly(
   growth_data_bliss, gr, excess_bliss, "nci_almanac_gr_vs_excess_bliss_scatter",
-  x_range = c(1.2, -12.5), y_range = c(-2.5, 2.5),
+  x_range = c(1.2, -5), y_range = c(-2.5, 2.5),
   xlab = "GR", ylab = "Excess over Bliss"
 )
 
@@ -525,7 +533,7 @@ plot_scatter_rasterly(
 
 plot_scatter_rasterly(
   growth_data_bliss_agg, gr_gr_min, excess_bliss_gr_min, "nci_almanac_gr_min_vs_excess_bliss_gr_min",
-  x_range = c(1.5, -12.5), y_range = c(-2.5, 2.5),
+  x_range = c(1.5, -6), y_range = c(-2.5, 2.5),
   xlab = "GR min", ylab = "Excess over Bliss at GR min"
 )
 
@@ -615,8 +623,108 @@ plt <- plot_scatter_rasterly(
   geom_smooth(
     method = "lm", se=FALSE, color="black"
   )
+```
 
 
+```{r agg_cell}
+growth_data_bliss_agg_cells <- growth_data_bliss_agg %>%
+  group_by(
+    lspci_id_1, lspci_id_2, 
+  ) %>%
+  summarize(across(where(is.numeric), mean), .groups = "drop")
+
+plot_scatter_rasterly(
+  growth_data_bliss_agg_cells, gr_gr_min, excess_bliss_auc, "nci_almanac_cells_agg_gr_min_vs_auc_scatter",
+  x_range = c(1.2, -5), y_range = c(-6, 6),
+  xlab = "GR min", ylab = "Excess over Bliss AUC"
+)
+```
+
+```{r agg_cell}
+growth_data_bliss_agg_cells <- growth_data_bliss_agg %>%
+  group_by(
+    lspci_id_1, lspci_id_2, 
+  ) %>%
+  summarize(across(where(is.numeric), mean), .groups = "drop")
+
+plot_scatter_rasterly(
+  growth_data_bliss_agg_cells, gr_gr_min, excess_bliss_auc, "nci_almanac_cells_agg_gr_min_vs_auc_scatter",
+  x_range = c(1.2, -5), y_range = c(-6, 6),
+  xlab = "GR min", ylab = "Excess over Bliss AUC"
+)
+
+plot_scatter_rasterly(
+  growth_data_bliss_agg_cells, gr_gr_min, excess_bliss_gr_min, "nci_almanac_cells_agg_gr_min_vs_excess_bliss_gr_min_scatter",
+  x_range = c(1.2, -5), y_range = c(-1.5, 1.5),
+  xlab = "GR min", ylab = "Excess over Bliss at GR min"
+)
+
+plot_scatter_rasterly(
+  growth_data_bliss_agg_cells, gr_mean, excess_bliss_auc, "nci_almanac_cells_agg_gr_mean_vs_auc_scatter",
+  x_range = c(1.2, -1), y_range = c(-6, 6),
+  xlab = "GR mean", ylab = "Excess over Bliss AUC"
+)
+```
+
+
+```{r variance}
+p <- growth_data_bliss_agg %>%
+  left_join(meta_cell_line) %>%
+  # mutate(across(c(panel_id, cell_id), as.factor)) %>%
+  ggplot(
+    aes(panel_name, gr_bound_gr_min)
+  ) +
+    geom_violin() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+p <- growth_data_bliss_agg %>%
+  left_join(meta_cell_line) %>%
+  ggplot(
+    aes(1, gr_bound_gr_min)
+  ) +
+    geom_violin()
+
+growth_data_bliss_agg_var <- tribble(
+  ~var_across, ~group_vars,
+  "combination", list(sym("lspci_id_1"), sym("lspci_id_2")),
+  "cell_line", list(sym("panel_id"), sym("cell_id"))
+)
+growth_data_bliss_agg_var_data <- map(
+  growth_data_bliss_agg_var$group_vars,
+  function(g) {
+    growth_data_bliss_agg %>%
+      group_by(!!!g) %>%
+      summarize(across(where(is.numeric), sd), .groups = "drop")
+  }
+)
+growth_data_bliss_agg_var <- growth_data_bliss_agg_var %>%
+  mutate(data = growth_data_bliss_agg_var_data) %>%
+  select(-group_vars) %>%
+  unnest(data)
+
+p <- growth_data_bliss_agg_var %>%
+  ggplot(aes(var_across, gr_bound_gr_min)) +
+    # geom_violin() +
+    geom_quasirandom() +
+    labs(x = NULL, y = "Standard deviation GR bound")
+ggsave(
+  file.path(dir_res, "standard_deviation_beeswarm_gr_bound_gr_min.pdf"),
+  p, width = 3, height = 5
+)
+
+p <- growth_data_bliss_agg_var %>%
+  ggplot(aes(var_across, fraction_killing_gr_min)) +
+    # geom_violin() +
+    geom_quasirandom() +
+    labs(x = NULL, y = "Standard deviation fraction killing")
+ggsave(
+  file.path(dir_res, "standard_deviation_beeswarm_fraction_killing_gr_min.pdf"),
+  p, width = 3, height = 5
+)
+```
+
+
+```{r}
 ## By cell line
 dir_res_by_cell <- file.path(dir_res, "by_cell_line")
 dir.create(dir_res_by_cell, showWarnings = FALSE)
