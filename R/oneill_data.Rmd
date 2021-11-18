@@ -1,0 +1,127 @@
+---
+title: "Process O'Neil data"
+author: "Clemens Hug"
+date: "11/18/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(data.table)
+library(vroom)
+library(fst)
+library(here)
+
+data.table::setDTthreads(4)
+
+dir_data <- here("data")
+dir.create(dir_data, showWarnings = FALSE)
+dir_res <- here("oneil")
+dir.create(dir_res, showWarnings = FALSE)
+
+synapser::synLogin()
+syn <- synExtra::synDownloader(dir_data, ifcollision = "overwrite.local")
+```
+
+## Download
+
+```{r download, message=FALSE}
+options(timeout = 300)
+
+raw_single_path <- file.path(dir_data, "oneill_single_raw.xlsx")
+if (!file.exists(raw_single_path))
+  download.file(
+    "https://mct.aacrjournals.org/highwire/filestream/53222/field_highwire_adjunct_files/1/156849_1_supp_0_w2lh45.xlsx",
+    raw_single_path
+  )
+
+raw_combo_path <- file.path(dir_data, "oneill_combo_raw.xlsx")
+if (!file.exists(raw_combo_path))
+  download.file(
+    "https://mct.aacrjournals.org/highwire/filestream/53222/field_highwire_adjunct_files/3/156849_1_supp_1_w2lrww.xls",
+    raw_combo_path
+  )
+
+legend_path <- file.path(dir_data, "oneill_data_legend.xlsx")
+if (!file.exists(legend_path))
+  download.file(
+    "https://mct.aacrjournals.org/highwire/filestream/53222/field_highwire_adjunct_files/2/156849_1_supp_1_g2lr29.xlsx",
+    legend_path
+  )
+
+```
+
+
+```{r load}
+raw_single <- readxl::read_excel(
+  raw_single_path, na = "NULL"
+)
+
+raw_combo <- readxl::read_excel(
+  raw_combo_path, na = "NULL"
+)
+```
+
+
+```{r wrangle}
+single_long <- raw_single %>%
+  pivot_longer(
+    starts_with("viability"), names_to = "replicate", values_to = "viability"
+  ) %>%
+  mutate(
+    replicate = as.integer(str_replace(replicate, "viability", ""))
+  ) %>%
+  drop_na() %>%
+  rename(
+    batch = BatchID, concentration = `Drug_concentration (µM)`
+  )
+
+fwrite(
+  single_long,
+  file.path(dir_data, "oneill_single.csv.gz")
+)
+
+combo_long <- raw_combo %>%
+  pivot_longer(
+    starts_with("viability"), names_to = "replicate", values_to = "viability"
+  ) %>%
+  mutate(
+    replicate = as.integer(str_replace(replicate, "viability", ""))
+  ) %>%
+  drop_na() %>%
+  rename(
+    batch = BatchID,
+    drug_name_1 = drugA_name, concentration_1 = `drugA Conc (µM)`,
+    drug_name_2 = drugB_name, concentration_2 = `drugB Conc (µM)`
+  )
+
+fwrite(
+  combo_long,
+  file.path(dir_data, "oneill_combo.csv.gz")
+)
+
+
+```
+
+
+```{r store_synapse}
+activity <- synapser::Activity(
+  "Wrangle O'Neill et.al. growth data",
+  used = c(
+    "https://mct.aacrjournals.org/content/15/6/1155"
+  ),
+  executed = "https://github.com/clemenshug/brca_synergy/blob/main/R/oneill_data.Rmd"
+)
+
+syn_project <- "syn25859223"
+syn_oneill <- synExtra::synMkdir(syn_project, "data", "oneill", .recursive = TRUE)
+
+c(
+  file.path(dir_data, "oneill_single.csv.gz"),
+  file.path(dir_data, "oneill_combo.csv.gz")
+) %>%
+  synExtra::synStoreMany(parentId = syn_oneill, forceVersion = FALSE, activity = activity)
+
+```
+
+
